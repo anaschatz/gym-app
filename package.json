@@ -1,0 +1,27 @@
+{
+  "name": "gym-app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "postinstall": "node scripts/patch-expo-logbox.js",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native/virtualized-lists": "^0.85.3",
+    "expo": "^56.0.5",
+    "expo-status-bar": "~56.0.4",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "^0.85.3",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0",
+    "@types/react": "~19.2.14",
+    "typescript": "~6.0.3"
+  },
+  "private": true
+}

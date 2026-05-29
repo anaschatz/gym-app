@@ -1,0 +1,13 @@
+{
+  "icon": "./assets/icon.png",
+  "plugins": [
+    "expo-status-bar"
+  ],
+  "android": {
+    "package": "com.anonymous.gymapp"
+  },
+  "ios": {
+    "icon": "./assets/icon.png",
+    "bundleIdentifier": "com.chatzedakes.gymapp"
+  }
+}
