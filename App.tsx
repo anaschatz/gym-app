@@ -3,23 +3,44 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Alert,
   KeyboardAvoidingView,
+  type ListRenderItemInfo,
   Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
+  type StyleProp,
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   Vibration,
   View,
+  type ViewStyle,
 } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import Animated, {
+  Extrapolation,
+  FadeIn,
+  FadeOut,
+  interpolate,
+  Layout,
+  LinearTransition,
+  runOnJS,
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  useSharedValue,
+  type SharedValue,
+  withTiming,
+} from "react-native-reanimated";
 
 type WorkoutDayName = "Push" | "Pull" | "Legs";
 type WeightUnit = "lbs" | "kg";
 type CalorieLogType = "add" | "extract";
 type CalorieLogMode = "quick" | "macro";
-type AppTab = "Workouts" | "Nutrition" | "Weight" | "Analytics" | "Settings";
+type AppTab = "Workouts" | "Nutrition" | "Weight" | "Stats" | "Settings";
 type GoalMode = "Bulk" | "Cut";
 type ThemeMode = "Light" | "Dark";
 type MacroTargetMode = "Auto" | "Custom";
@@ -156,6 +177,10 @@ type CalendarCell = {
   completed: boolean;
   isToday: boolean;
 };
+type WeightHistoryItem = {
+  week: WeekEntry;
+  originalIndex: number;
+};
 
 const STORAGE_KEY = "@iphone_gym_tracker/weeks_v1";
 const EXTRA_DAYS_STORAGE_KEY = "@iphone_gym_tracker/extra_workout_days_v1";
@@ -165,7 +190,7 @@ const COMPLETED_SETS_STORAGE_KEY = "@iphone_gym_tracker/completed_sets_v1";
 const COMPLETED_DATES_STORAGE_KEY = "@iphone_gym_tracker/completed_dates_v1";
 const DAILY_CALORIE_TARGETS_STORAGE_KEY = "@iphone_gym_tracker/daily_calorie_targets_v1";
 const DAY_NAMES: WorkoutDayName[] = ["Push", "Pull", "Legs"];
-const APP_TABS: AppTab[] = ["Workouts", "Nutrition", "Weight", "Analytics", "Settings"];
+const APP_TABS: AppTab[] = ["Workouts", "Nutrition", "Weight", "Stats", "Settings"];
 const REST_SECONDS = 90;
 const MIN_REST_SECONDS = 1;
 const QUICK_WEIGHT_TAP_STEP_KG = 2.5;
@@ -180,6 +205,7 @@ const REST_TIMER_PRESETS = [
   { label: "3m", seconds: 180 },
 ];
 const IOS_KEYBOARD_VERTICAL_OFFSET = Platform.OS === "ios" ? 20 : 0;
+const KEYBOARD_DISMISS_MODE = Platform.OS === "ios" ? "interactive" : "on-drag";
 const SCREEN_TOP_PADDING = Platform.OS === "ios" ? 28 : 18;
 const SCREEN_BOTTOM_PADDING = Platform.OS === "ios" ? 44 : 28;
 const BOTTOM_TAB_BOTTOM_PADDING = Platform.OS === "ios" ? 26 : 10;
@@ -200,6 +226,7 @@ const MACRO_LABELS: Record<MacroName, string> = {
   carbs: "Carbs",
   fats: "Fats",
 };
+const MACRO_NAMES = Object.keys(MACRO_LABELS) as MacroName[];
 const MACRO_CALORIES_PER_GRAM: Record<MacroName, number> = {
   protein: 4,
   carbs: 4,
@@ -283,6 +310,10 @@ const STARTER_CALORIE_LOG_SIGNATURES = new Set([
   "add|690|2026-05-24T09:30:00.000Z",
   "add|910|2026-05-24T15:15:00.000Z",
 ]);
+const SPRING_LAYOUT = Layout.springify().damping(18).stiffness(180);
+const LIST_LAYOUT = LinearTransition.springify().damping(18).stiffness(170);
+const LIST_ENTERING = FadeIn.duration(170);
+const LIST_EXITING = FadeOut.duration(130);
 
 const makeId = (prefix: string) =>
   `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -954,6 +985,114 @@ const normalizeWeeks = (value: unknown): WeekEntry[] | null => {
   });
 };
 
+type AppStyles = ReturnType<typeof createStyles>;
+
+type BottomTabButtonProps = {
+  activeTab: AppTab;
+  index: number;
+  onPress: (tab: AppTab) => void;
+  pageWidth: number;
+  scrollX: SharedValue<number>;
+  styles: AppStyles;
+  tab: AppTab;
+};
+
+function BottomTabButton({ activeTab, index, onPress, pageWidth, scrollX, styles, tab }: BottomTabButtonProps) {
+  const inputRange = useMemo(
+    () => [(index - 1) * pageWidth, index * pageWidth, (index + 1) * pageWidth],
+    [index, pageWidth],
+  );
+  const isActive = activeTab === tab;
+
+  const activeFillStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollX.value, inputRange, [0, 1, 0], Extrapolation.CLAMP),
+  }));
+
+  const inactiveLabelStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollX.value, inputRange, [1, 0, 1], Extrapolation.CLAMP),
+  }));
+
+  const activeLabelStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollX.value, inputRange, [0, 1, 0], Extrapolation.CLAMP),
+  }));
+
+  return (
+    <TouchableOpacity
+      accessibilityRole="tab"
+      accessibilityState={{ selected: isActive }}
+      activeOpacity={0.85}
+      onPress={() => onPress(tab)}
+      style={styles.bottomTabButton}
+    >
+      <Animated.View pointerEvents="none" style={[styles.bottomTabActiveFill, activeFillStyle]} />
+      <View style={styles.bottomTabLabelStack}>
+        <Animated.Text numberOfLines={1} style={[styles.bottomTabText, inactiveLabelStyle]}>
+          {tab}
+        </Animated.Text>
+        <Animated.Text
+          numberOfLines={1}
+          style={[styles.bottomTabText, styles.activeBottomTabText, styles.bottomTabLabelOverlay, activeLabelStyle]}
+        >
+          {tab}
+        </Animated.Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+type SmoothModalProps = {
+  backdropStyle: StyleProp<ViewStyle>;
+  cardStyle: StyleProp<ViewStyle>;
+  children: React.ReactNode;
+  onRequestClose: () => void;
+  visible: boolean;
+};
+
+function SmoothModal({ backdropStyle, cardStyle, children, onRequestClose, visible }: SmoothModalProps) {
+  const [isMounted, setIsMounted] = useState(visible);
+  const [renderedChildren, setRenderedChildren] = useState(children);
+  const progress = useSharedValue(visible ? 1 : 0);
+
+  useEffect(() => {
+    if (visible) {
+      setRenderedChildren(children);
+      setIsMounted(true);
+      progress.value = withTiming(1, { duration: 190 });
+      return;
+    }
+
+    progress.value = withTiming(0, { duration: 150 }, (finished) => {
+      if (finished) {
+        runOnJS(setIsMounted)(false);
+      }
+    });
+  }, [children, progress, visible]);
+
+  const animatedBackdropStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+  }));
+
+  const animatedCardStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+    transform: [
+      { translateY: interpolate(progress.value, [0, 1], [18, 0], Extrapolation.CLAMP) },
+      { scale: interpolate(progress.value, [0, 1], [0.965, 1], Extrapolation.CLAMP) },
+    ],
+  }));
+
+  if (!isMounted) {
+    return null;
+  }
+
+  return (
+    <Modal animationType="none" transparent visible={isMounted} onRequestClose={onRequestClose}>
+      <Animated.View style={[backdropStyle, animatedBackdropStyle]}>
+        <Animated.View style={[cardStyle, animatedCardStyle]}>{renderedChildren}</Animated.View>
+      </Animated.View>
+    </Modal>
+  );
+}
+
 export default function App() {
   const [weeks, setWeeks] = useState<WeekEntry[]>(MOCK_WEEKS);
   const [activeWeekIndex, setActiveWeekIndex] = useState(MOCK_WEEKS.length - 1);
@@ -987,6 +1126,11 @@ export default function App() {
   const warnedAtThreeSecondsRef = useRef(false);
   const exerciseSwipeStartRef = useRef<{ exerciseId: string; x: number; y: number } | null>(null);
   const appliedDailyCalorieTargetRef = useRef<string | null>(null);
+  const tabPagerRef = useRef<ScrollView>(null);
+  const { width: windowWidth } = useWindowDimensions();
+  const pageWidth = Math.max(1, windowWidth);
+  const previousPageWidthRef = useRef(pageWidth);
+  const tabScrollX = useSharedValue(0);
   const todayDateKey = useMemo(() => formatDateKey(new Date()), []);
 
   const currentWeek = weeks[activeWeekIndex] ?? weeks[0];
@@ -1004,6 +1148,25 @@ export default function App() {
   const currentWorkoutDayLabel = activeExtraWorkoutDay?.label ?? activeWorkoutBaseDay;
   const theme = useMemo(() => getThemeTokens(themeMode), [themeMode]);
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const activeTabIndex = useMemo(() => Math.max(0, APP_TABS.indexOf(activeTab)), [activeTab]);
+  const tabScrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      tabScrollX.value = event.contentOffset.x;
+    },
+  });
+
+  useEffect(() => {
+    if (previousPageWidthRef.current === pageWidth) {
+      return;
+    }
+
+    previousPageWidthRef.current = pageWidth;
+    const nextOffset = activeTabIndex * pageWidth;
+    tabScrollX.value = nextOffset;
+    requestAnimationFrame(() => {
+      tabPagerRef.current?.scrollTo({ animated: false, x: nextOffset, y: 0 });
+    });
+  }, [activeTabIndex, pageWidth, tabScrollX]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1289,85 +1452,145 @@ export default function App() {
     [activeExtraWorkoutDay, activeWorkoutBaseDay, currentWeek.id, updateCurrentWeek],
   );
 
-  const updateExercise = (exerciseId: string, updater: (exercise: ExerciseEntry) => ExerciseEntry) => {
-    updateCurrentWorkoutDay((day) => ({
-      ...day,
-      exercises: day.exercises.map((exercise) => (exercise.id === exerciseId ? updater(exercise) : exercise)),
-    }));
-  };
+  const syncActiveTabFromOffset = useCallback(
+    (offsetX: number) => {
+      const nextIndex = Math.min(APP_TABS.length - 1, Math.max(0, Math.round(offsetX / pageWidth)));
+      const nextTab = APP_TABS[nextIndex];
 
-  const findPreviousExercise = (exercise: ExerciseEntry, exerciseIndex: number) => {
-    const previousDay = previousWeek?.days[activeWorkoutBaseDay];
-    if (!previousDay) {
-      return undefined;
-    }
+      if (nextTab && nextTab !== activeTab) {
+        setActiveTab(nextTab);
+      }
+    },
+    [activeTab, pageWidth],
+  );
 
-    const namedMatch = previousDay.exercises.find(
-      (candidate) => normalizeName(candidate.name) !== "" && normalizeName(candidate.name) === normalizeName(exercise.name),
-    );
+  const handleTabMomentumEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      syncActiveTabFromOffset(event.nativeEvent.contentOffset.x);
+    },
+    [syncActiveTabFromOffset],
+  );
 
-    return namedMatch ?? previousDay.exercises[exerciseIndex];
-  };
+  const handleTabScrollEndDrag = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const velocityX = event.nativeEvent.velocity?.x ?? 0;
+      if (Math.abs(velocityX) < 0.05) {
+        syncActiveTabFromOffset(event.nativeEvent.contentOffset.x);
+      }
+    },
+    [syncActiveTabFromOffset],
+  );
 
-  const getPreviousSet = (exercise: ExerciseEntry, exerciseIndex: number, setIndex: number) =>
-    findPreviousExercise(exercise, exerciseIndex)?.sets[setIndex];
+  const handleTabPress = useCallback(
+    (tab: AppTab) => {
+      const nextIndex = APP_TABS.indexOf(tab);
+      if (nextIndex < 0) {
+        return;
+      }
 
-  const previousSetLabel = (exercise: ExerciseEntry, exerciseIndex: number, setIndex: number) => {
-    const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
+      setActiveTab(tab);
+      tabPagerRef.current?.scrollTo({ animated: true, x: nextIndex * pageWidth, y: 0 });
+    },
+    [pageWidth],
+  );
 
-    if (!previousSet || (!previousSet.weight && !previousSet.reps)) {
-      return "Prev: --";
-    }
+  const updateExercise = useCallback(
+    (exerciseId: string, updater: (exercise: ExerciseEntry) => ExerciseEntry) => {
+      updateCurrentWorkoutDay((day) => ({
+        ...day,
+        exercises: day.exercises.map((exercise) => (exercise.id === exerciseId ? updater(exercise) : exercise)),
+      }));
+    },
+    [updateCurrentWorkoutDay],
+  );
 
-    const weight = previousSet.weight || "--";
-    const reps = previousSet.reps || "--";
-    return `Prev: ${weight}${currentWeek.bodyweight.unit} x ${reps}`;
-  };
+  const findPreviousExercise = useCallback(
+    (exercise: ExerciseEntry, exerciseIndex: number) => {
+      const previousDay = previousWeek?.days[activeWorkoutBaseDay];
+      if (!previousDay) {
+        return undefined;
+      }
 
-  const previousSetPlaceholder = (
-    exercise: ExerciseEntry,
-    exerciseIndex: number,
-    setIndex: number,
-    field: "weight" | "reps",
-  ) => {
-    const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
-    if (activeWeekIndex <= 0 || !previousSet) {
-      return "0";
-    }
+      const namedMatch = previousDay.exercises.find(
+        (candidate) => normalizeName(candidate.name) !== "" && normalizeName(candidate.name) === normalizeName(exercise.name),
+      );
 
-    if (field === "weight") {
-      return previousSet.weight ? `Last ${previousSet.weight}${currentWeek.bodyweight.unit}` : "0";
-    }
+      return namedMatch ?? previousDay.exercises[exerciseIndex];
+    },
+    [activeWorkoutBaseDay, previousWeek],
+  );
 
-    return previousSet.reps ? `Last ${previousSet.reps}` : "0";
-  };
+  const getPreviousSet = useCallback(
+    (exercise: ExerciseEntry, exerciseIndex: number, setIndex: number) =>
+      findPreviousExercise(exercise, exerciseIndex)?.sets[setIndex],
+    [findPreviousExercise],
+  );
 
-  const setProgressStatus = (
-    exercise: ExerciseEntry,
-    exerciseIndex: number,
-    setIndex: number,
-    currentSet: WorkoutSet,
-  ): SetProgressStatus => {
-    const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
-    const previousWeight = safeNumber(previousSet?.weight ?? "");
-    const previousReps = safeNumber(previousSet?.reps ?? "");
-    const currentWeight = safeNumber(currentSet.weight);
-    const currentReps = safeNumber(currentSet.reps);
+  const previousSetLabel = useCallback(
+    (exercise: ExerciseEntry, exerciseIndex: number, setIndex: number) => {
+      const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
 
-    if (!previousSet || previousWeight <= 0 || previousReps <= 0 || currentWeight <= 0 || currentReps <= 0) {
-      return { symbol: "—", label: "No comparison", tone: "neutral" };
-    }
+      if (!previousSet || (!previousSet.weight && !previousSet.reps)) {
+        return "Prev: --";
+      }
 
-    if (currentWeight > previousWeight || currentReps > previousReps) {
-      return { symbol: "▲", label: "Progressive overload", tone: "positive" };
-    }
+      const weight = previousSet.weight || "--";
+      const reps = previousSet.reps || "--";
+      return `Prev: ${weight}${currentWeek.bodyweight.unit} x ${reps}`;
+    },
+    [currentWeek.bodyweight.unit, getPreviousSet],
+  );
 
-    if (currentWeight === previousWeight && currentReps === previousReps) {
-      return { symbol: "=", label: "Same as last week", tone: "neutral" };
-    }
+  const previousSetPlaceholder = useCallback(
+    (
+      exercise: ExerciseEntry,
+      exerciseIndex: number,
+      setIndex: number,
+      field: "weight" | "reps",
+    ) => {
+      const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
+      if (activeWeekIndex <= 0 || !previousSet) {
+        return "0";
+      }
 
-    return { symbol: "▼", label: "Below last week", tone: "negative" };
-  };
+      if (field === "weight") {
+        return previousSet.weight ? `Last ${previousSet.weight}${currentWeek.bodyweight.unit}` : "0";
+      }
+
+      return previousSet.reps ? `Last ${previousSet.reps}` : "0";
+    },
+    [activeWeekIndex, currentWeek.bodyweight.unit, getPreviousSet],
+  );
+
+  const setProgressStatus = useCallback(
+    (
+      exercise: ExerciseEntry,
+      exerciseIndex: number,
+      setIndex: number,
+      currentSet: WorkoutSet,
+    ): SetProgressStatus => {
+      const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
+      const previousWeight = safeNumber(previousSet?.weight ?? "");
+      const previousReps = safeNumber(previousSet?.reps ?? "");
+      const currentWeight = safeNumber(currentSet.weight);
+      const currentReps = safeNumber(currentSet.reps);
+
+      if (!previousSet || previousWeight <= 0 || previousReps <= 0 || currentWeight <= 0 || currentReps <= 0) {
+        return { symbol: "—", label: "No comparison", tone: "neutral" };
+      }
+
+      if (currentWeight > previousWeight || currentReps > previousReps) {
+        return { symbol: "▲", label: "Progressive overload", tone: "positive" };
+      }
+
+      if (currentWeight === previousWeight && currentReps === previousReps) {
+        return { symbol: "=", label: "Same as last week", tone: "neutral" };
+      }
+
+      return { symbol: "▼", label: "Below last week", tone: "negative" };
+    },
+    [getPreviousSet],
+  );
 
   const calorieTotals = useMemo(() => calculateDayCalories(currentDay), [currentDay]);
   const dailyCalorieTarget = useMemo(
@@ -1507,14 +1730,42 @@ export default function App() {
     };
   }, [currentWeek.bodyweight.unit, currentWeek.bodyweight.value, goalMode, previousWeek]);
 
-  const setBodyweightValue = (value: string) => {
+  const currentWeekVolume = useMemo(
+    () => calculateWeekVolume(currentWeek, currentExtraWorkoutDays),
+    [currentExtraWorkoutDays, currentWeek],
+  );
+
+  const currentOneRepMaxSnapshot = useMemo(
+    () =>
+      currentWorkoutDay.exercises.map((exercise) => ({
+        id: exercise.id,
+        name: exercise.name,
+        oneRepMax: calculateExerciseOneRepMax(exercise),
+      })),
+    [currentWorkoutDay.exercises],
+  );
+
+  const weightHistory = useMemo<WeightHistoryItem[]>(
+    () =>
+      weeks
+        .map((week, originalIndex) => ({ originalIndex, week }))
+        .reverse(),
+    [weeks],
+  );
+
+  const nutritionLogs = useMemo(
+    () => (nutritionMode === "Quick Calories" ? quickCalorieLogs : macroFoodLogs),
+    [macroFoodLogs, nutritionMode, quickCalorieLogs],
+  );
+
+  const setBodyweightValue = useCallback((value: string) => {
     updateCurrentWeek((week) => ({
       ...week,
       bodyweight: { ...week.bodyweight, value },
     }));
-  };
+  }, [updateCurrentWeek]);
 
-  const toggleWeightUnit = () => {
+  const toggleWeightUnit = useCallback(() => {
     updateCurrentWeek((week) => ({
       ...week,
       bodyweight: {
@@ -1522,9 +1773,9 @@ export default function App() {
         unit: week.bodyweight.unit === "lbs" ? "kg" : "lbs",
       },
     }));
-  };
+  }, [updateCurrentWeek]);
 
-  const addWeek = () => {
+  const addWeek = useCallback(() => {
     const previous = weeks[weeks.length - 1];
     const nextWeekNumber = (previous?.weekNumber ?? weeks.length) + 1;
     const nextWeek = createBlankWeek(nextWeekNumber, previous);
@@ -1532,9 +1783,9 @@ export default function App() {
     setActiveWeekIndex(weeks.length);
     setActiveDay("Push");
     setActiveWorkoutDayId("Push");
-  };
+  }, [weeks]);
 
-  const deleteCurrentWeek = () => {
+  const deleteCurrentWeek = useCallback(() => {
     if (weeks.length <= 1) {
       return;
     }
@@ -1555,9 +1806,9 @@ export default function App() {
     shouldVibrateWhenTimerEndsRef.current = false;
     warnedAtThreeSecondsRef.current = false;
     setRestSeconds(0);
-  };
+  }, [activeWeekIndex, currentWeek.id, weeks.length]);
 
-  const confirmDeleteCurrentWeek = () => {
+  const confirmDeleteCurrentWeek = useCallback(() => {
     Alert.alert(
       "Delete Week",
       `Are you sure you want to delete Week ${currentWeek.weekNumber}?`,
@@ -1566,9 +1817,9 @@ export default function App() {
         { text: "Delete", onPress: deleteCurrentWeek, style: "destructive" },
       ],
     );
-  };
+  }, [currentWeek.weekNumber, deleteCurrentWeek]);
 
-  const addExercise = () => {
+  const addExercise = useCallback(() => {
     const trimmedName = newExerciseName.trim();
     if (!trimmedName) {
       return;
@@ -1579,9 +1830,9 @@ export default function App() {
       exercises: [...day.exercises, makeExercise(trimmedName)],
     }));
     setNewExerciseName("");
-  };
+  }, [newExerciseName, updateCurrentWorkoutDay]);
 
-  const clearCompletedSetIds = (setIds: string[]) => {
+  const clearCompletedSetIds = useCallback((setIds: string[]) => {
     if (setIds.length === 0) {
       return;
     }
@@ -1599,9 +1850,9 @@ export default function App() {
 
       return changed ? nextCompletedSets : previousCompletedSets;
     });
-  };
+  }, []);
 
-  const removeExercise = (exerciseId: string) => {
+  const removeExercise = useCallback((exerciseId: string) => {
     const exerciseToRemove = currentWorkoutDay.exercises.find((exercise) => exercise.id === exerciseId);
 
     updateCurrentWorkoutDay((day) => ({
@@ -1610,9 +1861,9 @@ export default function App() {
     }));
     clearCompletedSetIds(exerciseToRemove?.sets.map((set) => set.id) ?? []);
     setSwipedExerciseId(null);
-  };
+  }, [clearCompletedSetIds, currentWorkoutDay.exercises, updateCurrentWorkoutDay]);
 
-  const moveExercise = (exerciseId: string, direction: -1 | 1) => {
+  const moveExercise = useCallback((exerciseId: string, direction: -1 | 1) => {
     updateCurrentWorkoutDay((day) => {
       const currentIndex = day.exercises.findIndex((exercise) => exercise.id === exerciseId);
       const targetIndex = currentIndex + direction;
@@ -1630,33 +1881,33 @@ export default function App() {
       };
     });
     setSwipedExerciseId(null);
-  };
+  }, [updateCurrentWorkoutDay]);
 
-  const addSet = (exerciseId: string) => {
+  const addSet = useCallback((exerciseId: string) => {
     updateExercise(exerciseId, (exercise) => ({
       ...exercise,
       sets: [...exercise.sets, makeSet()],
     }));
-  };
+  }, [updateExercise]);
 
-  const removeSet = (exerciseId: string, setId: string) => {
+  const removeSet = useCallback((exerciseId: string, setId: string) => {
     updateExercise(exerciseId, (exercise) => ({
       ...exercise,
       sets: exercise.sets.filter((set) => set.id !== setId),
     }));
 
     clearCompletedSetIds([setId]);
-  };
+  }, [clearCompletedSetIds, updateExercise]);
 
-  const updateSet = (exerciseId: string, setId: string, field: keyof Pick<WorkoutSet, "weight" | "reps" | "rpe">, value: string) => {
+  const updateSet = useCallback((exerciseId: string, setId: string, field: keyof Pick<WorkoutSet, "weight" | "reps" | "rpe">, value: string) => {
     const nextValue = field === "rpe" ? formatRpeInput(value) : value;
     updateExercise(exerciseId, (exercise) => ({
       ...exercise,
       sets: exercise.sets.map((set) => (set.id === setId ? { ...set, [field]: nextValue } : set)),
     }));
-  };
+  }, [updateExercise]);
 
-  const adjustSetWeight = (exerciseId: string, setId: string, deltaKg: number, fallbackWeight = "") => {
+  const adjustSetWeight = useCallback((exerciseId: string, setId: string, deltaKg: number, fallbackWeight = "") => {
     const delta = currentWeek.bodyweight.unit === "kg" ? deltaKg : convertWeight(deltaKg, "kg", "lbs");
 
     updateExercise(exerciseId, (exercise) => ({
@@ -1677,9 +1928,9 @@ export default function App() {
         };
       }),
     }));
-  };
+  }, [currentWeek.bodyweight.unit, updateExercise]);
 
-  const copyPreviousSets = (exercise: ExerciseEntry, exerciseIndex: number) => {
+  const copyPreviousSets = useCallback((exercise: ExerciseEntry, exerciseIndex: number) => {
     const previousExercise = findPreviousExercise(exercise, exerciseIndex);
     if (!previousExercise?.sets.length) {
       return;
@@ -1689,9 +1940,9 @@ export default function App() {
       ...currentExercise,
       sets: previousExercise.sets.map((set) => makeSet(set.weight, set.reps, set.rpe)),
     }));
-  };
+  }, [findPreviousExercise, updateExercise]);
 
-  const updateCalorieTarget = (value: string) => {
+  const updateCalorieTarget = useCallback((value: string) => {
     updateCurrentWeek((week) => applyCalorieTargetToBaseDays(week, value));
 
     if (safeNumber(value) > 0) {
@@ -1700,9 +1951,9 @@ export default function App() {
         [todayDateKey]: value,
       }));
     }
-  };
+  }, [todayDateKey, updateCurrentWeek]);
 
-  const setCalorieDraft = (field: keyof FoodDraft, value: string) => {
+  const setCalorieDraft = useCallback((field: keyof FoodDraft, value: string) => {
     setCalorieDrafts((previousDrafts) => ({
       ...previousDrafts,
       [activeDay]: {
@@ -1710,9 +1961,9 @@ export default function App() {
         [field]: value,
       },
     }));
-  };
+  }, [activeDay]);
 
-  const setQuickCalorieDraft = (type: CalorieLogType, value: string) => {
+  const setQuickCalorieDraft = useCallback((type: CalorieLogType, value: string) => {
     setQuickCalorieDrafts((previousDrafts) => ({
       ...previousDrafts,
       [activeDay]: {
@@ -1720,9 +1971,9 @@ export default function App() {
         [type]: value,
       },
     }));
-  };
+  }, [activeDay]);
 
-  const submitQuickCalorieLog = (type: CalorieLogType) => {
+  const submitQuickCalorieLog = useCallback((type: CalorieLogType) => {
     const amount = safeNumber(quickCalorieDraft[type]);
 
     if (amount <= 0) {
@@ -1744,9 +1995,9 @@ export default function App() {
         [type]: "",
       },
     }));
-  };
+  }, [activeDay, quickCalorieDraft, updateCurrentDay]);
 
-  const submitFoodLog = () => {
+  const submitFoodLog = useCallback(() => {
     const amount = Number(calorieDraft.calories);
 
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -1772,9 +2023,9 @@ export default function App() {
       ...previousDrafts,
       [activeDay]: emptyFoodDraft(),
     }));
-  };
+  }, [activeDay, calorieDraft, updateCurrentDay]);
 
-  const deleteCalorieLog = (logId: string) => {
+  const deleteCalorieLog = useCallback((logId: string) => {
     updateCurrentDay((day) => ({
       ...day,
       calories: {
@@ -1782,9 +2033,9 @@ export default function App() {
         logs: day.calories.logs.filter((log) => log.id !== logId),
       },
     }));
-  };
+  }, [updateCurrentDay]);
 
-  const addCompletedDateForToday = () => {
+  const addCompletedDateForToday = useCallback(() => {
     const todayKey = formatDateKey(new Date());
     setCompletedDates((previousDates) => {
       if (previousDates.includes(todayKey)) {
@@ -1793,13 +2044,13 @@ export default function App() {
 
       return [todayKey, ...previousDates];
     });
-  };
+  }, []);
 
-  const beginExerciseSwipe = (exerciseId: string, x: number, y: number) => {
+  const beginExerciseSwipe = useCallback((exerciseId: string, x: number, y: number) => {
     exerciseSwipeStartRef.current = { exerciseId, x, y };
-  };
+  }, []);
 
-  const finishExerciseSwipe = (exerciseId: string, x: number, y: number) => {
+  const finishExerciseSwipe = useCallback((exerciseId: string, x: number, y: number) => {
     const start = exerciseSwipeStartRef.current;
     exerciseSwipeStartRef.current = null;
 
@@ -1815,9 +2066,9 @@ export default function App() {
     }
 
     setSwipedExerciseId(deltaX < 0 ? exerciseId : null);
-  };
+  }, []);
 
-  const toggleSetComplete = (setId: string) => {
+  const toggleSetComplete = useCallback((setId: string) => {
     const shouldStartTimer = !completedSets[setId];
     if (shouldStartTimer && timerSettings.enabled) {
       shouldVibrateWhenTimerEndsRef.current = true;
@@ -1841,33 +2092,33 @@ export default function App() {
         [setId]: new Date().toISOString(),
       };
     });
-  };
+  }, [addCompletedDateForToday, completedSets, timerSettings.duration, timerSettings.enabled]);
 
-  const openPlateCalculator = (exerciseName: string, weight: string) => {
+  const openPlateCalculator = useCallback((exerciseName: string, weight: string) => {
     const parsedWeight = safeNumber(weight);
     if (parsedWeight <= 0) {
       return;
     }
 
     setPlateModal({ exerciseName, weight: parsedWeight });
-  };
+  }, []);
 
-  const updateMacroTarget = (macroName: MacroName, value: string) => {
+  const updateMacroTarget = useCallback((macroName: MacroName, value: string) => {
     setMacroTargetMode("Custom");
     setCustomMacroTargets((previousTargets) => ({
       ...previousTargets,
       [macroName]: value,
     }));
-  };
+  }, []);
 
-  const selectWorkoutDay = (dayId: string) => {
+  const selectWorkoutDay = useCallback((dayId: string) => {
     setActiveWorkoutDayId(dayId);
     if (DAY_NAMES.includes(dayId as WorkoutDayName)) {
       setActiveDay(dayId as WorkoutDayName);
     }
-  };
+  }, []);
 
-  const addExtraWorkoutDay = (preset: ExtraWorkoutDayPreset) => {
+  const addExtraWorkoutDay = useCallback((preset: ExtraWorkoutDayPreset) => {
     const presetConfig = EXTRA_DAY_PRESETS.find((option) => option.label === preset) ?? EXTRA_DAY_PRESETS[0];
     const customLabel = customDayName.trim();
     const baseDay = preset === "Custom" ? activeDay : presetConfig.baseDay;
@@ -1888,23 +2139,23 @@ export default function App() {
     setActiveWorkoutDayId(nextDay.id);
     setCustomDayName("");
     setIsAddDayModalVisible(false);
-  };
+  }, [activeDay, currentExtraWorkoutDays.length, currentWeek.days, currentWeek.id, customDayName]);
 
-  const setRestTimerDuration = (duration: number) => {
+  const setRestTimerDuration = useCallback((duration: number) => {
     const nextDuration = Math.max(MIN_REST_SECONDS, Math.round(duration));
     setTimerSettings((previousSettings) => ({ ...previousSettings, duration: nextDuration }));
     setTimerDurationDraft(String(nextDuration));
-  };
+  }, []);
 
-  const adjustTimerDuration = (delta: number) => {
+  const adjustTimerDuration = useCallback((delta: number) => {
     setRestTimerDuration(timerSettings.duration + delta);
-  };
+  }, [setRestTimerDuration, timerSettings.duration]);
 
-  const updateTimerDurationDraft = (value: string) => {
+  const updateTimerDurationDraft = useCallback((value: string) => {
     setTimerDurationDraft(value.replace(/[^0-9]/g, ""));
-  };
+  }, []);
 
-  const applyTimerDurationDraft = () => {
+  const applyTimerDurationDraft = useCallback(() => {
     const nextDuration = safeNumber(timerDurationDraft);
 
     if (nextDuration <= 0) {
@@ -1913,9 +2164,9 @@ export default function App() {
     }
 
     setRestTimerDuration(nextDuration);
-  };
+  }, [setRestTimerDuration, timerDurationDraft, timerSettings.duration]);
 
-  const toggleTimerEnabled = () => {
+  const toggleTimerEnabled = useCallback(() => {
     setTimerSettings((previousSettings) => {
       const enabled = !previousSettings.enabled;
       if (!enabled) {
@@ -1926,15 +2177,15 @@ export default function App() {
 
       return { ...previousSettings, enabled };
     });
-  };
+  }, []);
 
-  const toggleMacroTargetMode = (mode: MacroTargetMode) => {
+  const toggleMacroTargetMode = useCallback((mode: MacroTargetMode) => {
     if (mode === "Custom" && macroTargetMode === "Auto") {
       setCustomMacroTargets(macroTargets);
     }
 
     setMacroTargetMode(mode);
-  };
+  }, [macroTargetMode, macroTargets]);
 
   const renderStorageWarning = () =>
     storageError ? (
@@ -2056,10 +2307,10 @@ export default function App() {
     );
   };
 
-  const renderMacroBar = (macroName: MacroName) => {
+  const renderMacroBar = useCallback((macroName: MacroName) => {
     const target = safeNumber(macroTargets[macroName]);
     return (
-      <View key={macroName} style={styles.macroCard}>
+      <Animated.View entering={LIST_ENTERING} layout={SPRING_LAYOUT} key={macroName} style={styles.macroCard}>
         <View style={styles.macroHeader}>
           <Text style={styles.macroTitle}>{MACRO_LABELS[macroName]}</Text>
           <Text style={styles.macroMeta}>
@@ -2080,9 +2331,9 @@ export default function App() {
             value={macroTargets[macroName]}
           />
         </View>
-      </View>
+      </Animated.View>
     );
-  };
+  }, [macroProgress, macroTargetMode, macroTargets, macroTotals, styles, theme.placeholder, updateMacroTarget]);
 
   const renderPlateModal = () => {
     const targetKg = plateModal ? toKilograms(plateModal.weight, currentWeek.bodyweight.unit) : 0;
@@ -2094,9 +2345,12 @@ export default function App() {
     });
 
     return (
-      <Modal animationType="fade" transparent visible={Boolean(plateModal)} onRequestClose={() => setPlateModal(null)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
+      <SmoothModal
+        backdropStyle={styles.modalBackdrop}
+        cardStyle={styles.modalCard}
+        visible={Boolean(plateModal)}
+        onRequestClose={() => setPlateModal(null)}
+      >
             <View style={styles.modalHeader}>
               <View>
                 <Text style={styles.modalTitle}>Plate Calculator</Text>
@@ -2116,16 +2370,17 @@ export default function App() {
                 </View>
               ))}
             </View>
-          </View>
-        </View>
-      </Modal>
+      </SmoothModal>
     );
   };
 
   const renderAddDayModal = () => (
-    <Modal animationType="fade" transparent visible={isAddDayModalVisible} onRequestClose={() => setIsAddDayModalVisible(false)}>
-      <View style={styles.modalBackdrop}>
-        <View style={styles.modalCard}>
+    <SmoothModal
+      backdropStyle={styles.modalBackdrop}
+      cardStyle={styles.modalCard}
+      visible={isAddDayModalVisible}
+      onRequestClose={() => setIsAddDayModalVisible(false)}
+    >
           <View style={styles.modalHeader}>
             <View>
               <Text style={styles.modalTitle}>Add Workout Day</Text>
@@ -2165,272 +2420,350 @@ export default function App() {
               </TouchableOpacity>
             </View>
           </View>
+    </SmoothModal>
+  );
+
+  const exerciseKeyExtractor = useCallback((exercise: ExerciseEntry) => exercise.id, []);
+
+  const renderWorkoutHeader = useCallback(
+    () => (
+      <>
+        <View style={styles.heroHeader}>
+          <View>
+            <Text style={styles.screenTitle}>Workouts</Text>
+            <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - {currentWorkoutDayLabel}</Text>
+          </View>
         </View>
-      </View>
-    </Modal>
+
+        {renderStorageWarning()}
+        {renderRestTimer()}
+        {renderWeekSelector()}
+        {renderWorkoutDayTabs()}
+
+        <View style={styles.sectionHeader}>
+          <View>
+            <Text style={styles.sectionTitle}>{currentWorkoutDayLabel}</Text>
+            <Text style={styles.sectionSubtitle}>
+              {timerSettings.enabled ? "Tap weight for plates. Check a set to start rest." : "Tap weight for plates. Rest timer is hidden."}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.addExerciseRow}>
+          <TextInput
+            onChangeText={setNewExerciseName}
+            placeholder="Add exercise"
+            placeholderTextColor={theme.placeholder}
+            returnKeyType="done"
+            onSubmitEditing={addExercise}
+            style={styles.exerciseInput}
+            value={newExerciseName}
+          />
+          <TouchableOpacity activeOpacity={0.8} onPress={addExercise} style={styles.primaryButton}>
+            <Text style={styles.primaryButtonText}>Add</Text>
+          </TouchableOpacity>
+        </View>
+      </>
+    ),
+    [
+      addExercise,
+      currentWeek.weekNumber,
+      currentWorkoutDayLabel,
+      newExerciseName,
+      renderRestTimer,
+      renderStorageWarning,
+      renderWeekSelector,
+      renderWorkoutDayTabs,
+      styles,
+      theme.placeholder,
+      timerSettings.enabled,
+    ],
+  );
+
+  const renderWorkoutEmpty = useCallback(
+    () => (
+      <Animated.View entering={LIST_ENTERING} layout={SPRING_LAYOUT} style={styles.emptyState}>
+        <Text style={styles.emptyTitle}>No exercises yet</Text>
+        <Text style={styles.emptyBody}>Add your first movement and start logging quality work.</Text>
+      </Animated.View>
+    ),
+    [styles],
+  );
+
+  const renderExerciseItem = useCallback(
+    ({ item: exercise, index: exerciseIndex }: ListRenderItemInfo<ExerciseEntry>) => {
+      const hasPreviousSets = Boolean(findPreviousExercise(exercise, exerciseIndex)?.sets.length);
+      const oneRepMax = calculateExerciseOneRepMax(exercise);
+      const isSwipeOpen = swipedExerciseId === exercise.id;
+
+      return (
+        <Animated.View
+          entering={LIST_ENTERING}
+          exiting={LIST_EXITING}
+          layout={SPRING_LAYOUT}
+          onTouchCancel={() => {
+            exerciseSwipeStartRef.current = null;
+          }}
+          onTouchEnd={(event) => finishExerciseSwipe(exercise.id, event.nativeEvent.pageX, event.nativeEvent.pageY)}
+          onTouchStart={(event) => beginExerciseSwipe(exercise.id, event.nativeEvent.pageX, event.nativeEvent.pageY)}
+          style={styles.exerciseSwipeFrame}
+        >
+          {isSwipeOpen ? (
+            <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.swipeActionRail}>
+              <TouchableOpacity activeOpacity={0.82} onPress={() => removeExercise(exercise.id)} style={styles.swipeDeleteButton}>
+                <Text style={styles.swipeDeleteText}>Delete</Text>
+              </TouchableOpacity>
+            </Animated.View>
+          ) : null}
+          <Animated.View layout={SPRING_LAYOUT} style={[styles.exerciseCard, isSwipeOpen && styles.exerciseCardSwiped]}>
+            <View style={styles.exerciseHeader}>
+              <View style={styles.exerciseTitleWrap}>
+                <TextInput
+                  onChangeText={(value) =>
+                    updateExercise(exercise.id, (currentExercise) => ({
+                      ...currentExercise,
+                      name: value,
+                    }))
+                  }
+                  placeholder="Exercise name"
+                  placeholderTextColor={theme.placeholder}
+                  style={styles.exerciseNameInput}
+                  value={exercise.name}
+                />
+                <Text style={styles.oneRepMaxText}>
+                  {oneRepMax > 0 ? `Est. 1RM ${Math.round(oneRepMax)}${currentWeek.bodyweight.unit}` : "Est. 1RM --"}
+                </Text>
+              </View>
+              <View style={styles.exerciseHeaderActions}>
+                <View style={styles.exerciseOrderControls}>
+                  <TouchableOpacity
+                    activeOpacity={0.75}
+                    disabled={exerciseIndex === 0}
+                    onPress={() => moveExercise(exercise.id, -1)}
+                    style={[styles.orderButton, exerciseIndex === 0 && styles.disabledIconButton]}
+                  >
+                    <Text style={styles.orderButtonText}>↑</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    activeOpacity={0.75}
+                    disabled={exerciseIndex === currentWorkoutDay.exercises.length - 1}
+                    onPress={() => moveExercise(exercise.id, 1)}
+                    style={[
+                      styles.orderButton,
+                      exerciseIndex === currentWorkoutDay.exercises.length - 1 && styles.disabledIconButton,
+                    ]}
+                  >
+                    <Text style={styles.orderButtonText}>↓</Text>
+                  </TouchableOpacity>
+                </View>
+                <TouchableOpacity activeOpacity={0.75} onPress={() => removeExercise(exercise.id)} style={styles.removeExerciseButton}>
+                  <Text style={styles.removeText}>Remove</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.setHeaderRow}>
+              <Text style={styles.setHeaderIndex}>Set</Text>
+              <Text style={styles.setHeaderText}>Weight</Text>
+              <Text style={styles.setHeaderText}>Reps</Text>
+              <Text style={styles.setHeaderRpe}>RPE</Text>
+              <Text style={styles.setHeaderDone}>Done</Text>
+              <Text style={styles.setHeaderDelete}>Del</Text>
+            </View>
+
+            {exercise.sets.map((set, setIndex) => {
+              const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
+              const progressStatus = setProgressStatus(exercise, exerciseIndex, setIndex, set);
+              const isMaxEffort = Boolean(completedSets[set.id]) && safeNumber(set.rpe) >= 10;
+              const weightPlaceholder = previousSetPlaceholder(exercise, exerciseIndex, setIndex, "weight");
+              const repsPlaceholder = previousSetPlaceholder(exercise, exerciseIndex, setIndex, "reps");
+              const progressBadgeStyle =
+                progressStatus.tone === "positive"
+                  ? styles.positiveProgressBadge
+                  : progressStatus.tone === "negative"
+                    ? styles.negativeProgressBadge
+                    : styles.neutralProgressBadge;
+              const progressTextStyle =
+                progressStatus.tone === "positive"
+                  ? styles.positiveProgressText
+                  : progressStatus.tone === "negative"
+                    ? styles.negativeProgressText
+                    : styles.neutralProgressText;
+
+              return (
+                <Animated.View
+                  entering={LIST_ENTERING}
+                  exiting={LIST_EXITING}
+                  key={set.id}
+                  layout={SPRING_LAYOUT}
+                  style={styles.setRow}
+                >
+                  <View style={styles.setMainRow}>
+                    <Text style={styles.setNumber}>{setIndex + 1}</Text>
+                    <View style={styles.setWeightCell}>
+                      <TextInput
+                        keyboardType="decimal-pad"
+                        onChangeText={(value) => updateSet(exercise.id, set.id, "weight", value)}
+                        onFocus={() => openPlateCalculator(exercise.name, set.weight)}
+                        onPressIn={() => openPlateCalculator(exercise.name, set.weight)}
+                        placeholder={weightPlaceholder}
+                        placeholderTextColor={theme.placeholder}
+                        style={styles.setWeightInput}
+                        value={set.weight}
+                      />
+                      <View style={styles.weightQuickActions}>
+                        <TouchableOpacity
+                          activeOpacity={0.76}
+                          delayLongPress={260}
+                          onLongPress={() =>
+                            adjustSetWeight(exercise.id, set.id, -QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSet?.weight)
+                          }
+                          onPress={() => adjustSetWeight(exercise.id, set.id, -QUICK_WEIGHT_TAP_STEP_KG, previousSet?.weight)}
+                          style={styles.weightQuickButton}
+                        >
+                          <Text style={styles.weightQuickText}>-</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          activeOpacity={0.76}
+                          delayLongPress={260}
+                          onLongPress={() =>
+                            adjustSetWeight(exercise.id, set.id, QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSet?.weight)
+                          }
+                          onPress={() => adjustSetWeight(exercise.id, set.id, QUICK_WEIGHT_TAP_STEP_KG, previousSet?.weight)}
+                          style={styles.weightQuickButton}
+                        >
+                          <Text style={styles.weightQuickText}>+</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <TouchableOpacity activeOpacity={0.8} onPress={() => openPlateCalculator(exercise.name, set.weight)} style={styles.plateMiniButton}>
+                        <Text style={styles.plateMiniButtonText}>kg</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <TextInput
+                      keyboardType="number-pad"
+                      onChangeText={(value) => updateSet(exercise.id, set.id, "reps", value)}
+                      placeholder={repsPlaceholder}
+                      placeholderTextColor={theme.placeholder}
+                      style={styles.setInput}
+                      value={set.reps}
+                    />
+                    <TextInput
+                      keyboardType="number-pad"
+                      maxLength={2}
+                      onChangeText={(value) => updateSet(exercise.id, set.id, "rpe", value)}
+                      placeholder="1-10"
+                      placeholderTextColor={theme.placeholder}
+                      style={styles.rpeInput}
+                      value={set.rpe}
+                    />
+                    <TouchableOpacity
+                      activeOpacity={0.8}
+                      onPress={() => toggleSetComplete(set.id)}
+                      style={[styles.doneSetButton, completedSets[set.id] && styles.doneSetButtonActive]}
+                    >
+                      <Text style={[styles.doneSetText, completedSets[set.id] && styles.doneSetTextActive]}>✓</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      activeOpacity={0.8}
+                      onPress={() => removeSet(exercise.id, set.id)}
+                      style={styles.removeSetButton}
+                    >
+                      <Text style={styles.removeSetText}>X</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.previousLine}>
+                    <Text style={styles.previousLineLabel}>Previous</Text>
+                    <View style={styles.previousBadge}>
+                      <Text numberOfLines={1} style={styles.previousBadgeText}>
+                        {previousSetLabel(exercise, exerciseIndex, setIndex)}
+                      </Text>
+                    </View>
+                    <View style={[styles.progressBadge, progressBadgeStyle]}>
+                      <Text style={[styles.progressSymbol, progressTextStyle]}>{progressStatus.symbol}</Text>
+                      <Text numberOfLines={1} style={[styles.progressLabel, progressTextStyle]}>
+                        {progressStatus.label}
+                      </Text>
+                    </View>
+                  </View>
+                  {isMaxEffort ? (
+                    <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.maxEffortBadge}>
+                      <Text style={styles.maxEffortText}>🔥 Max Effort</Text>
+                    </Animated.View>
+                  ) : null}
+                </Animated.View>
+              );
+            })}
+
+            <View style={styles.exerciseActions}>
+              <TouchableOpacity activeOpacity={0.8} onPress={() => addSet(exercise.id)} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>Add Set</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                activeOpacity={0.8}
+                disabled={!hasPreviousSets}
+                onPress={() => copyPreviousSets(exercise, exerciseIndex)}
+                style={[styles.outlineButton, !hasPreviousSets && styles.disabledButton]}
+              >
+                <Text style={styles.outlineButtonText}>Same Last Week</Text>
+              </TouchableOpacity>
+            </View>
+          </Animated.View>
+        </Animated.View>
+      );
+    },
+    [
+      addSet,
+      adjustSetWeight,
+      beginExerciseSwipe,
+      completedSets,
+      copyPreviousSets,
+      currentWeek.bodyweight.unit,
+      currentWorkoutDay.exercises.length,
+      findPreviousExercise,
+      finishExerciseSwipe,
+      getPreviousSet,
+      moveExercise,
+      openPlateCalculator,
+      previousSetLabel,
+      previousSetPlaceholder,
+      removeExercise,
+      removeSet,
+      setProgressStatus,
+      styles,
+      swipedExerciseId,
+      theme.placeholder,
+      toggleSetComplete,
+      updateExercise,
+      updateSet,
+    ],
   );
 
   const renderWorkoutTab = () => (
-    <ScrollView bounces contentContainerStyle={styles.screenContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-      <View style={styles.heroHeader}>
-        <View>
-          <Text style={styles.screenTitle}>Workouts</Text>
-          <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - {currentWorkoutDayLabel}</Text>
-        </View>
-      </View>
-
-      {renderStorageWarning()}
-      {renderRestTimer()}
-      {renderWeekSelector()}
-      {renderWorkoutDayTabs()}
-
-      <View style={styles.sectionHeader}>
-        <View>
-          <Text style={styles.sectionTitle}>{currentWorkoutDayLabel}</Text>
-          <Text style={styles.sectionSubtitle}>
-            {timerSettings.enabled ? "Tap weight for plates. Check a set to start rest." : "Tap weight for plates. Rest timer is hidden."}
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.addExerciseRow}>
-        <TextInput
-          onChangeText={setNewExerciseName}
-          placeholder="Add exercise"
-          placeholderTextColor={theme.placeholder}
-          returnKeyType="done"
-          onSubmitEditing={addExercise}
-          style={styles.exerciseInput}
-          value={newExerciseName}
-        />
-        <TouchableOpacity activeOpacity={0.8} onPress={addExercise} style={styles.primaryButton}>
-          <Text style={styles.primaryButtonText}>Add</Text>
-        </TouchableOpacity>
-      </View>
-
-      {currentWorkoutDay.exercises.length === 0 ? (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>No exercises yet</Text>
-          <Text style={styles.emptyBody}>Add your first movement and start logging quality work.</Text>
-        </View>
-      ) : (
-        currentWorkoutDay.exercises.map((exercise, exerciseIndex) => {
-          const hasPreviousSets = Boolean(findPreviousExercise(exercise, exerciseIndex)?.sets.length);
-          const oneRepMax = calculateExerciseOneRepMax(exercise);
-          const isSwipeOpen = swipedExerciseId === exercise.id;
-
-          return (
-            <View
-              key={exercise.id}
-              onTouchCancel={() => {
-                exerciseSwipeStartRef.current = null;
-              }}
-              onTouchEnd={(event) => finishExerciseSwipe(exercise.id, event.nativeEvent.pageX, event.nativeEvent.pageY)}
-              onTouchStart={(event) => beginExerciseSwipe(exercise.id, event.nativeEvent.pageX, event.nativeEvent.pageY)}
-              style={styles.exerciseSwipeFrame}
-            >
-              {isSwipeOpen ? (
-                <View style={styles.swipeActionRail}>
-                  <TouchableOpacity activeOpacity={0.82} onPress={() => removeExercise(exercise.id)} style={styles.swipeDeleteButton}>
-                    <Text style={styles.swipeDeleteText}>Delete</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : null}
-              <View style={[styles.exerciseCard, isSwipeOpen && styles.exerciseCardSwiped]}>
-              <View style={styles.exerciseHeader}>
-                <View style={styles.exerciseTitleWrap}>
-                  <TextInput
-                    onChangeText={(value) =>
-                      updateExercise(exercise.id, (currentExercise) => ({
-                        ...currentExercise,
-                        name: value,
-                      }))
-                    }
-                    placeholder="Exercise name"
-                    placeholderTextColor={theme.placeholder}
-                    style={styles.exerciseNameInput}
-                    value={exercise.name}
-                  />
-                  <Text style={styles.oneRepMaxText}>{oneRepMax > 0 ? `Est. 1RM ${Math.round(oneRepMax)}${currentWeek.bodyweight.unit}` : "Est. 1RM --"}</Text>
-                </View>
-                <View style={styles.exerciseHeaderActions}>
-                  <View style={styles.exerciseOrderControls}>
-                    <TouchableOpacity
-                      activeOpacity={0.75}
-                      disabled={exerciseIndex === 0}
-                      onPress={() => moveExercise(exercise.id, -1)}
-                      style={[styles.orderButton, exerciseIndex === 0 && styles.disabledIconButton]}
-                    >
-                      <Text style={styles.orderButtonText}>↑</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      activeOpacity={0.75}
-                      disabled={exerciseIndex === currentWorkoutDay.exercises.length - 1}
-                      onPress={() => moveExercise(exercise.id, 1)}
-                      style={[
-                        styles.orderButton,
-                        exerciseIndex === currentWorkoutDay.exercises.length - 1 && styles.disabledIconButton,
-                      ]}
-                    >
-                      <Text style={styles.orderButtonText}>↓</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <TouchableOpacity activeOpacity={0.75} onPress={() => removeExercise(exercise.id)} style={styles.removeExerciseButton}>
-                    <Text style={styles.removeText}>Remove</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              <View style={styles.setHeaderRow}>
-                <Text style={styles.setHeaderIndex}>Set</Text>
-                <Text style={styles.setHeaderText}>Weight</Text>
-                <Text style={styles.setHeaderText}>Reps</Text>
-                <Text style={styles.setHeaderRpe}>RPE</Text>
-                <Text style={styles.setHeaderDone}>Done</Text>
-                <Text style={styles.setHeaderDelete}>Del</Text>
-              </View>
-
-              {exercise.sets.map((set, setIndex) => {
-                const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
-                const progressStatus = setProgressStatus(exercise, exerciseIndex, setIndex, set);
-                const isMaxEffort = Boolean(completedSets[set.id]) && safeNumber(set.rpe) >= 10;
-                const weightPlaceholder = previousSetPlaceholder(exercise, exerciseIndex, setIndex, "weight");
-                const repsPlaceholder = previousSetPlaceholder(exercise, exerciseIndex, setIndex, "reps");
-                const progressBadgeStyle =
-                  progressStatus.tone === "positive"
-                    ? styles.positiveProgressBadge
-                    : progressStatus.tone === "negative"
-                      ? styles.negativeProgressBadge
-                      : styles.neutralProgressBadge;
-                const progressTextStyle =
-                  progressStatus.tone === "positive"
-                    ? styles.positiveProgressText
-                    : progressStatus.tone === "negative"
-                      ? styles.negativeProgressText
-                      : styles.neutralProgressText;
-                return (
-                  <View key={set.id} style={styles.setRow}>
-                    <View style={styles.setMainRow}>
-                      <Text style={styles.setNumber}>{setIndex + 1}</Text>
-                      <View style={styles.setWeightCell}>
-                        <TextInput
-                          keyboardType="decimal-pad"
-                          onChangeText={(value) => updateSet(exercise.id, set.id, "weight", value)}
-                          onFocus={() => openPlateCalculator(exercise.name, set.weight)}
-                          onPressIn={() => openPlateCalculator(exercise.name, set.weight)}
-                          placeholder={weightPlaceholder}
-                          placeholderTextColor={theme.placeholder}
-                          style={styles.setWeightInput}
-                          value={set.weight}
-                        />
-                        <View style={styles.weightQuickActions}>
-                          <TouchableOpacity
-                            activeOpacity={0.76}
-                            delayLongPress={260}
-                            onLongPress={() =>
-                              adjustSetWeight(exercise.id, set.id, -QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSet?.weight)
-                            }
-                            onPress={() => adjustSetWeight(exercise.id, set.id, -QUICK_WEIGHT_TAP_STEP_KG, previousSet?.weight)}
-                            style={styles.weightQuickButton}
-                          >
-                            <Text style={styles.weightQuickText}>-</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            activeOpacity={0.76}
-                            delayLongPress={260}
-                            onLongPress={() =>
-                              adjustSetWeight(exercise.id, set.id, QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSet?.weight)
-                            }
-                            onPress={() => adjustSetWeight(exercise.id, set.id, QUICK_WEIGHT_TAP_STEP_KG, previousSet?.weight)}
-                            style={styles.weightQuickButton}
-                          >
-                            <Text style={styles.weightQuickText}>+</Text>
-                          </TouchableOpacity>
-                        </View>
-                        <TouchableOpacity activeOpacity={0.8} onPress={() => openPlateCalculator(exercise.name, set.weight)} style={styles.plateMiniButton}>
-                          <Text style={styles.plateMiniButtonText}>kg</Text>
-                        </TouchableOpacity>
-                      </View>
-                      <TextInput
-                        keyboardType="number-pad"
-                        onChangeText={(value) => updateSet(exercise.id, set.id, "reps", value)}
-                        placeholder={repsPlaceholder}
-                        placeholderTextColor={theme.placeholder}
-                        style={styles.setInput}
-                        value={set.reps}
-                      />
-                      <TextInput
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        onChangeText={(value) => updateSet(exercise.id, set.id, "rpe", value)}
-                        placeholder="1-10"
-                        placeholderTextColor={theme.placeholder}
-                        style={styles.rpeInput}
-                        value={set.rpe}
-                      />
-                      <TouchableOpacity
-                        activeOpacity={0.8}
-                        onPress={() => toggleSetComplete(set.id)}
-                        style={[styles.doneSetButton, completedSets[set.id] && styles.doneSetButtonActive]}
-                      >
-                        <Text style={[styles.doneSetText, completedSets[set.id] && styles.doneSetTextActive]}>✓</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        activeOpacity={0.8}
-                        onPress={() => removeSet(exercise.id, set.id)}
-                        style={styles.removeSetButton}
-                      >
-                        <Text style={styles.removeSetText}>X</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <View style={styles.previousLine}>
-                      <Text style={styles.previousLineLabel}>Previous</Text>
-                      <View style={styles.previousBadge}>
-                        <Text numberOfLines={1} style={styles.previousBadgeText}>
-                          {previousSetLabel(exercise, exerciseIndex, setIndex)}
-                        </Text>
-                      </View>
-                      <View style={[styles.progressBadge, progressBadgeStyle]}>
-                        <Text style={[styles.progressSymbol, progressTextStyle]}>
-                          {progressStatus.symbol}
-                        </Text>
-                        <Text numberOfLines={1} style={[styles.progressLabel, progressTextStyle]}>
-                          {progressStatus.label}
-                        </Text>
-                      </View>
-                    </View>
-                    {isMaxEffort ? (
-                      <View style={styles.maxEffortBadge}>
-                        <Text style={styles.maxEffortText}>🔥 Max Effort</Text>
-                      </View>
-                    ) : null}
-                  </View>
-                );
-              })}
-
-              <View style={styles.exerciseActions}>
-                <TouchableOpacity activeOpacity={0.8} onPress={() => addSet(exercise.id)} style={styles.secondaryButton}>
-                  <Text style={styles.secondaryButtonText}>Add Set</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  disabled={!hasPreviousSets}
-                  onPress={() => copyPreviousSets(exercise, exerciseIndex)}
-                  style={[styles.outlineButton, !hasPreviousSets && styles.disabledButton]}
-                >
-                  <Text style={styles.outlineButtonText}>Same Last Week</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-            </View>
-          );
-        })
-      )}
-    </ScrollView>
+    <Animated.FlatList<ExerciseEntry>
+      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      bounces
+      contentContainerStyle={styles.screenContent}
+      data={currentWorkoutDay.exercises}
+      initialNumToRender={4}
+      itemLayoutAnimation={LIST_LAYOUT}
+      keyboardDismissMode={KEYBOARD_DISMISS_MODE}
+      keyboardShouldPersistTaps="handled"
+      keyExtractor={exerciseKeyExtractor}
+      ListEmptyComponent={renderWorkoutEmpty}
+      ListHeaderComponent={renderWorkoutHeader}
+      maxToRenderPerBatch={4}
+      removeClippedSubviews={Platform.OS === "android"}
+      renderItem={renderExerciseItem}
+      showsVerticalScrollIndicator={false}
+      updateCellsBatchingPeriod={32}
+      windowSize={5}
+    />
   );
 
-  const renderNutritionTab = () => (
-    <ScrollView bounces contentContainerStyle={styles.screenContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+  const nutritionLogKeyExtractor = useCallback((log: CalorieLog) => log.id, []);
+
+  const renderNutritionHeader = () => (
+    <>
       <View style={styles.heroHeader}>
         <View>
           <Text style={styles.screenTitle}>Nutrition</Text>
@@ -2473,67 +2806,41 @@ export default function App() {
       </View>
 
       {nutritionMode === "Quick Calories" ? (
-        <>
-          <View style={styles.calorieInputGrid}>
-            <View style={styles.calorieInputBlock}>
-              <Text style={styles.calorieInputLabel}>Add Calories</Text>
-              <View style={styles.calorieInputRow}>
-                <TextInput
-                  keyboardType="number-pad"
-                  onChangeText={(value) => setQuickCalorieDraft("add", value)}
-                  placeholder="+250"
-                  placeholderTextColor={theme.placeholder}
-                  style={styles.calorieInput}
-                  value={quickCalorieDraft.add}
-                />
-                <TouchableOpacity activeOpacity={0.8} onPress={() => submitQuickCalorieLog("add")} style={styles.calorieActionButton}>
-                  <Text style={styles.calorieActionButtonText}>Add</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            <View style={styles.calorieInputBlock}>
-              <Text style={styles.calorieInputLabel}>Subtract Calories</Text>
-              <View style={styles.calorieInputRow}>
-                <TextInput
-                  keyboardType="number-pad"
-                  onChangeText={(value) => setQuickCalorieDraft("extract", value)}
-                  placeholder="-100"
-                  placeholderTextColor={theme.placeholder}
-                  style={styles.calorieInput}
-                  value={quickCalorieDraft.extract}
-                />
-                <TouchableOpacity activeOpacity={0.8} onPress={() => submitQuickCalorieLog("extract")} style={styles.calorieActionButton}>
-                  <Text style={styles.calorieActionButtonText}>Subtract</Text>
-                </TouchableOpacity>
-              </View>
+        <View style={styles.calorieInputGrid}>
+          <View style={styles.calorieInputBlock}>
+            <Text style={styles.calorieInputLabel}>Add Calories</Text>
+            <View style={styles.calorieInputRow}>
+              <TextInput
+                keyboardType="number-pad"
+                onChangeText={(value) => setQuickCalorieDraft("add", value)}
+                placeholder="+250"
+                placeholderTextColor={theme.placeholder}
+                style={styles.calorieInput}
+                value={quickCalorieDraft.add}
+              />
+              <TouchableOpacity activeOpacity={0.8} onPress={() => submitQuickCalorieLog("add")} style={styles.calorieActionButton}>
+                <Text style={styles.calorieActionButtonText}>Add</Text>
+              </TouchableOpacity>
             </View>
           </View>
 
-          <View style={styles.historyHeader}>
-            <Text style={styles.historyTitle}>Quick Logs</Text>
-            <Text style={styles.historyCount}>{quickCalorieLogs.length} entries</Text>
+          <View style={styles.calorieInputBlock}>
+            <Text style={styles.calorieInputLabel}>Subtract Calories</Text>
+            <View style={styles.calorieInputRow}>
+              <TextInput
+                keyboardType="number-pad"
+                onChangeText={(value) => setQuickCalorieDraft("extract", value)}
+                placeholder="-100"
+                placeholderTextColor={theme.placeholder}
+                style={styles.calorieInput}
+                value={quickCalorieDraft.extract}
+              />
+              <TouchableOpacity activeOpacity={0.8} onPress={() => submitQuickCalorieLog("extract")} style={styles.calorieActionButton}>
+                <Text style={styles.calorieActionButtonText}>Subtract</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          {quickCalorieLogs.length === 0 ? (
-            <Text style={styles.noHistoryText}>No quick calorie logs yet.</Text>
-          ) : (
-            quickCalorieLogs.map((log) => (
-              <View key={log.id} style={styles.historyRow}>
-                <View style={[styles.historyTypeDot, log.type === "extract" && styles.extractDot]} />
-                <View style={styles.historyCopy}>
-                  <Text style={styles.historyMain}>
-                    {log.type === "add" ? "+" : "-"}
-                    {log.amount} kcal
-                  </Text>
-                  <Text style={styles.historyDate}>{formatDateTime(log.createdAt)}</Text>
-                </View>
-                <TouchableOpacity activeOpacity={0.75} onPress={() => deleteCalorieLog(log.id)} style={styles.deleteLogButton}>
-                  <Text style={styles.deleteLogText}>Delete</Text>
-                </TouchableOpacity>
-              </View>
-            ))
-          )}
-        </>
+        </View>
       ) : (
         <>
           <View style={styles.sectionHeader}>
@@ -2544,7 +2851,7 @@ export default function App() {
               </Text>
             </View>
           </View>
-          {(Object.keys(macroTotals) as MacroName[]).map(renderMacroBar)}
+          {MACRO_NAMES.map(renderMacroBar)}
 
           <View style={styles.calorieInputGrid}>
             <View style={styles.calorieInputBlock}>
@@ -2569,7 +2876,7 @@ export default function App() {
               />
             </View>
             <View style={styles.foodMacroGrid}>
-              {(Object.keys(MACRO_LABELS) as MacroName[]).map((macroName) => (
+              {MACRO_NAMES.map((macroName) => (
                 <View key={macroName} style={styles.foodMacroInputBlock}>
                   <Text style={styles.calorieInputLabel}>{MACRO_LABELS[macroName]}</Text>
                   <TextInput
@@ -2587,41 +2894,92 @@ export default function App() {
               <Text style={styles.addWeekText}>Add Meal</Text>
             </TouchableOpacity>
           </View>
-
-          <View style={styles.historyHeader}>
-            <Text style={styles.historyTitle}>Meals</Text>
-            <Text style={styles.historyCount}>{macroFoodLogs.length} entries</Text>
-          </View>
-          {macroFoodLogs.length === 0 ? (
-            <Text style={styles.noHistoryText}>No macro meals logged yet.</Text>
-          ) : (
-            macroFoodLogs.map((log) => {
-              const logMacros = log.macros ?? EMPTY_MACROS;
-              return (
-                <View key={log.id} style={styles.historyRow}>
-                  <View style={styles.historyTypeDot} />
-                  <View style={styles.historyCopy}>
-                    <Text style={styles.historyMain}>
-                      {log.label ?? "Meal"} - +{log.amount} kcal
-                    </Text>
-                    <Text style={styles.historyDate}>
-                      {formatDateTime(log.createdAt)} - {formatMacroSummary(logMacros)}
-                    </Text>
-                  </View>
-                  <TouchableOpacity activeOpacity={0.75} onPress={() => deleteCalorieLog(log.id)} style={styles.deleteLogButton}>
-                    <Text style={styles.deleteLogText}>Delete</Text>
-                  </TouchableOpacity>
-                </View>
-              );
-            })
-          )}
         </>
       )}
-    </ScrollView>
+
+      <View style={styles.historyHeader}>
+        <Text style={styles.historyTitle}>{nutritionMode === "Quick Calories" ? "Quick Logs" : "Meals"}</Text>
+        <Text style={styles.historyCount}>{nutritionLogs.length} entries</Text>
+      </View>
+    </>
   );
 
-  const renderWeightTab = () => (
-    <ScrollView bounces contentContainerStyle={styles.screenContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+  const renderNutritionEmpty = useCallback(
+    () => (
+      <Animated.Text entering={LIST_ENTERING} style={styles.noHistoryText}>
+        {nutritionMode === "Quick Calories" ? "No quick calorie logs yet." : "No macro meals logged yet."}
+      </Animated.Text>
+    ),
+    [nutritionMode, styles.noHistoryText],
+  );
+
+  const renderNutritionLogItem = useCallback(
+    ({ item: log }: ListRenderItemInfo<CalorieLog>) => {
+      if (nutritionMode === "Quick Calories") {
+        return (
+          <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.historyRow}>
+            <View style={[styles.historyTypeDot, log.type === "extract" && styles.extractDot]} />
+            <View style={styles.historyCopy}>
+              <Text style={styles.historyMain}>
+                {log.type === "add" ? "+" : "-"}
+                {log.amount} kcal
+              </Text>
+              <Text style={styles.historyDate}>{formatDateTime(log.createdAt)}</Text>
+            </View>
+            <TouchableOpacity activeOpacity={0.75} onPress={() => deleteCalorieLog(log.id)} style={styles.deleteLogButton}>
+              <Text style={styles.deleteLogText}>Delete</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        );
+      }
+
+      const logMacros = log.macros ?? EMPTY_MACROS;
+      return (
+        <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.historyRow}>
+          <View style={styles.historyTypeDot} />
+          <View style={styles.historyCopy}>
+            <Text style={styles.historyMain}>
+              {log.label ?? "Meal"} - +{log.amount} kcal
+            </Text>
+            <Text style={styles.historyDate}>
+              {formatDateTime(log.createdAt)} - {formatMacroSummary(logMacros)}
+            </Text>
+          </View>
+          <TouchableOpacity activeOpacity={0.75} onPress={() => deleteCalorieLog(log.id)} style={styles.deleteLogButton}>
+            <Text style={styles.deleteLogText}>Delete</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      );
+    },
+    [deleteCalorieLog, nutritionMode, styles],
+  );
+
+  const renderNutritionTab = () => (
+    <Animated.FlatList<CalorieLog>
+      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      bounces
+      contentContainerStyle={styles.screenContent}
+      data={nutritionLogs}
+      initialNumToRender={8}
+      itemLayoutAnimation={LIST_LAYOUT}
+      keyboardDismissMode={KEYBOARD_DISMISS_MODE}
+      keyboardShouldPersistTaps="handled"
+      keyExtractor={nutritionLogKeyExtractor}
+      ListEmptyComponent={renderNutritionEmpty}
+      ListHeaderComponent={renderNutritionHeader}
+      maxToRenderPerBatch={8}
+      removeClippedSubviews={Platform.OS === "android"}
+      renderItem={renderNutritionLogItem}
+      showsVerticalScrollIndicator={false}
+      updateCellsBatchingPeriod={32}
+      windowSize={7}
+    />
+  );
+
+  const weightHistoryKeyExtractor = useCallback((entry: WeightHistoryItem) => entry.week.id, []);
+
+  const renderWeightHeader = () => (
+    <>
       <View style={styles.heroHeader}>
         <View>
           <Text style={styles.screenTitle}>Weight</Text>
@@ -2697,30 +3055,50 @@ export default function App() {
         <Text style={styles.historyTitle}>Weight History</Text>
         <Text style={styles.historyCount}>{weeks.length} entries</Text>
       </View>
-      <View style={styles.weightHistoryList}>
-        {[...weeks].reverse().map((week, reverseIndex) => {
-          const originalIndex = weeks.length - 1 - reverseIndex;
-          return (
-            <View key={week.id} style={styles.weightHistoryRow}>
-              <View>
-                <Text style={styles.weightHistoryWeek}>Week {week.weekNumber}</Text>
-                <Text style={styles.weightHistoryMeta}>{formatWeightEntryDate(weeks.length, originalIndex)}</Text>
-              </View>
-              <Text style={styles.weightHistoryValue}>
-                {week.bodyweight.value ? `${week.bodyweight.value} ${week.bodyweight.unit}` : "--"}
-              </Text>
-            </View>
-          );
-        })}
-      </View>
-    </ScrollView>
+    </>
+  );
+
+  const renderWeightHistoryItem = useCallback(
+    ({ item }: ListRenderItemInfo<WeightHistoryItem>) => (
+      <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.weightHistoryRow}>
+        <View>
+          <Text style={styles.weightHistoryWeek}>Week {item.week.weekNumber}</Text>
+          <Text style={styles.weightHistoryMeta}>{formatWeightEntryDate(weeks.length, item.originalIndex)}</Text>
+        </View>
+        <Text style={styles.weightHistoryValue}>
+          {item.week.bodyweight.value ? `${item.week.bodyweight.value} ${item.week.bodyweight.unit}` : "--"}
+        </Text>
+      </Animated.View>
+    ),
+    [styles, weeks.length],
+  );
+
+  const renderWeightTab = () => (
+    <Animated.FlatList<WeightHistoryItem>
+      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      bounces
+      contentContainerStyle={styles.screenContent}
+      data={weightHistory}
+      initialNumToRender={8}
+      itemLayoutAnimation={LIST_LAYOUT}
+      keyboardDismissMode={KEYBOARD_DISMISS_MODE}
+      keyboardShouldPersistTaps="handled"
+      keyExtractor={weightHistoryKeyExtractor}
+      ListHeaderComponent={renderWeightHeader}
+      maxToRenderPerBatch={8}
+      removeClippedSubviews={Platform.OS === "android"}
+      renderItem={renderWeightHistoryItem}
+      showsVerticalScrollIndicator={false}
+      updateCellsBatchingPeriod={32}
+      windowSize={7}
+    />
   );
 
   const renderAnalyticsTab = () => (
     <ScrollView bounces contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
       <View style={styles.heroHeader}>
         <View>
-          <Text style={styles.screenTitle}>Analytics</Text>
+          <Text style={styles.screenTitle}>Stats</Text>
           <Text style={styles.screenSubtitle}>Progressive overload at a glance.</Text>
         </View>
       </View>
@@ -2733,7 +3111,7 @@ export default function App() {
         </View>
         <View style={styles.analyticsCard}>
           <Text style={styles.labelText}>Current Volume</Text>
-          <Text style={styles.analyticsNumber}>{Math.round(calculateWeekVolume(currentWeek, currentExtraWorkoutDays))}</Text>
+          <Text style={styles.analyticsNumber}>{Math.round(currentWeekVolume)}</Text>
           <Text style={styles.sectionSubtitle}>sets x reps x load</Text>
         </View>
       </View>
@@ -2770,7 +3148,7 @@ export default function App() {
           <Text style={styles.noHistoryText}>No personal records yet.</Text>
         ) : (
           personalRecords.map((record) => (
-            <View key={`${record.exerciseName}-${record.weekNumber}`} style={styles.prRow}>
+            <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} key={`${record.exerciseName}-${record.weekNumber}`} layout={SPRING_LAYOUT} style={styles.prRow}>
               <View style={styles.prCopy}>
                 <Text style={styles.prExercise}>{record.exerciseName}</Text>
                 <Text style={styles.prMeta}>Week {record.weekNumber}</Text>
@@ -2778,7 +3156,7 @@ export default function App() {
               <Text style={styles.prValue}>
                 {record.weight}{record.unit} x {record.reps} reps
               </Text>
-            </View>
+            </Animated.View>
           ))
         )}
       </View>
@@ -2792,11 +3170,11 @@ export default function App() {
           {weeklyVolumeData.map((entry) => {
             const height = Math.max(18, (entry.volume / maxWeeklyVolume) * 150);
             return (
-              <View key={entry.weekNumber} style={styles.volumeBarColumn}>
+              <Animated.View key={entry.weekNumber} layout={SPRING_LAYOUT} style={styles.volumeBarColumn}>
                 <Text style={styles.volumeValue}>{Math.round(entry.volume)}</Text>
                 <View style={[styles.volumeBar, { height }]} />
                 <Text style={styles.volumeLabel}>W{entry.weekNumber}</Text>
-              </View>
+              </Animated.View>
             );
           })}
         </View>
@@ -2804,11 +3182,11 @@ export default function App() {
 
       <View style={styles.chartCard}>
         <Text style={styles.historyTitle}>Estimated 1RM Snapshot</Text>
-        {currentWorkoutDay.exercises.map((exercise) => (
-          <View key={exercise.id} style={styles.oneRmRow}>
+        {currentOneRepMaxSnapshot.map((exercise) => (
+          <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} key={exercise.id} layout={SPRING_LAYOUT} style={styles.oneRmRow}>
             <Text style={styles.oneRmName}>{exercise.name}</Text>
-            <Text style={styles.oneRmValue}>{Math.round(calculateExerciseOneRepMax(exercise)) || "--"} {currentWeek.bodyweight.unit}</Text>
-          </View>
+            <Text style={styles.oneRmValue}>{Math.round(exercise.oneRepMax) || "--"} {currentWeek.bodyweight.unit}</Text>
+          </Animated.View>
         ))}
       </View>
     </ScrollView>
@@ -2833,7 +3211,14 @@ export default function App() {
   };
 
   const renderSettingsTab = () => (
-    <ScrollView bounces contentContainerStyle={styles.screenContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+    <ScrollView
+      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      bounces
+      contentContainerStyle={styles.screenContent}
+      keyboardDismissMode={KEYBOARD_DISMISS_MODE}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
       <View style={styles.heroHeader}>
         <View>
           <Text style={styles.screenTitle}>Settings</Text>
@@ -2956,20 +3341,20 @@ export default function App() {
     </ScrollView>
   );
 
-  const renderActiveTab = () => {
-    if (activeTab === "Nutrition") {
+  const renderTabPageContent = (tab: AppTab) => {
+    if (tab === "Nutrition") {
       return renderNutritionTab();
     }
 
-    if (activeTab === "Weight") {
+    if (tab === "Weight") {
       return renderWeightTab();
     }
 
-    if (activeTab === "Analytics") {
+    if (tab === "Stats") {
       return renderAnalyticsTab();
     }
 
-    if (activeTab === "Settings") {
+    if (tab === "Settings") {
       return renderSettingsTab();
     }
 
@@ -2977,41 +3362,70 @@ export default function App() {
   };
 
   return (
-    <View style={styles.safeArea}>
-      <StatusBar barStyle={themeMode === "Dark" ? "light-content" : "dark-content"} backgroundColor={theme.surface} />
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={IOS_KEYBOARD_VERTICAL_OFFSET}
-        style={styles.keyboardRoot}
-      >
-        <View style={styles.appShell}>
-          <View style={styles.contentArea}>{renderActiveTab()}</View>
-          {renderPlateModal()}
-          {renderAddDayModal()}
+    <GestureHandlerRootView style={styles.gestureRoot}>
+      <View style={styles.safeArea}>
+        <StatusBar barStyle={themeMode === "Dark" ? "light-content" : "dark-content"} backgroundColor={theme.surface} />
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          keyboardVerticalOffset={IOS_KEYBOARD_VERTICAL_OFFSET}
+          style={styles.keyboardRoot}
+        >
+          <View style={styles.appShell}>
+            <View style={styles.contentArea}>
+              <Animated.ScrollView
+                bounces={false}
+                contentContainerStyle={styles.tabPagerContent}
+                decelerationRate="fast"
+                directionalLockEnabled
+                horizontal
+                keyboardDismissMode={KEYBOARD_DISMISS_MODE}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled
+                onMomentumScrollEnd={handleTabMomentumEnd}
+                onScroll={tabScrollHandler}
+                onScrollEndDrag={handleTabScrollEndDrag}
+                overScrollMode="never"
+                pagingEnabled
+                ref={tabPagerRef}
+                scrollEventThrottle={8}
+                showsHorizontalScrollIndicator={false}
+              >
+                {APP_TABS.map((tab) => (
+                  <View key={tab} style={[styles.tabPage, { width: pageWidth }]}>
+                    {renderTabPageContent(tab)}
+                  </View>
+                ))}
+              </Animated.ScrollView>
+            </View>
+            {renderPlateModal()}
+            {renderAddDayModal()}
 
-          <View style={styles.bottomTabBar}>
-            {APP_TABS.map((tab) => {
-              const isActive = activeTab === tab;
-              return (
-                <TouchableOpacity
-                  activeOpacity={0.85}
+            <View style={styles.bottomTabBar}>
+              {APP_TABS.map((tab, index) => (
+                <BottomTabButton
+                  activeTab={activeTab}
+                  index={index}
                   key={tab}
-                  onPress={() => setActiveTab(tab)}
-                  style={[styles.bottomTabButton, isActive && styles.activeBottomTabButton]}
-                >
-                  <Text style={[styles.bottomTabText, isActive && styles.activeBottomTabText]}>{tab}</Text>
-                </TouchableOpacity>
-              );
-            })}
+                  onPress={handleTabPress}
+                  pageWidth={pageWidth}
+                  scrollX={tabScrollX}
+                  styles={styles}
+                  tab={tab}
+                />
+              ))}
+            </View>
           </View>
-        </View>
-      </KeyboardAvoidingView>
-    </View>
+        </KeyboardAvoidingView>
+      </View>
+    </GestureHandlerRootView>
   );
 }
 
 function createStyles(theme: ThemeTokens) {
   return StyleSheet.create({
+  gestureRoot: {
+    flex: 1,
+  },
   safeArea: {
     backgroundColor: theme.surface,
     flex: 1,
@@ -3025,6 +3439,12 @@ function createStyles(theme: ThemeTokens) {
     flex: 1,
   },
   contentArea: {
+    flex: 1,
+  },
+  tabPagerContent: {
+    flexGrow: 1,
+  },
+  tabPage: {
     flex: 1,
   },
   screenContent: {
@@ -4579,8 +4999,27 @@ function createStyles(theme: ThemeTokens) {
     flex: 1,
     justifyContent: "center",
     minHeight: 46,
+    overflow: "hidden",
     paddingHorizontal: 3,
     paddingVertical: 10,
+    position: "relative",
+  },
+  bottomTabActiveFill: {
+    backgroundColor: theme.text,
+    bottom: 0,
+    left: 0,
+    position: "absolute",
+    right: 0,
+    top: 0,
+  },
+  bottomTabLabelStack: {
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 14,
+    width: "100%",
+  },
+  bottomTabLabelOverlay: {
+    position: "absolute",
   },
   activeBottomTabButton: {
     backgroundColor: theme.text,
