@@ -1165,6 +1165,7 @@ export default function App() {
   const [timerDurationDraft, setTimerDurationDraft] = useState(String(DEFAULT_APP_SETTINGS.timerSettings.duration));
   const [macroTargetMode, setMacroTargetMode] = useState<MacroTargetMode>(DEFAULT_APP_SETTINGS.macroTargetMode);
   const [customMacroTargets, setCustomMacroTargets] = useState<MacroDrafts>(DEFAULT_APP_SETTINGS.customMacroTargets);
+  const [nutritionResetNotice, setNutritionResetNotice] = useState<string | null>(null);
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
   const shouldVibrateWhenTimerEndsRef = useRef(false);
@@ -2057,6 +2058,40 @@ export default function App() {
     }));
   }, [updateCurrentDay]);
 
+  const resetNutritionForNewDay = useCallback(() => {
+    updateCurrentDay((day) => ({
+      ...day,
+      calories: {
+        ...day.calories,
+        logs: [],
+      },
+    }));
+
+    setQuickCalorieDrafts((previousDrafts) => ({
+      ...previousDrafts,
+      [activeDay]: {
+        add: "",
+        extract: "",
+      },
+    }));
+    setCalorieDrafts((previousDrafts) => ({
+      ...previousDrafts,
+      [activeDay]: emptyFoodDraft(),
+    }));
+    setNutritionResetNotice(`New day started - ${formatDateTime(new Date().toISOString())}`);
+  }, [activeDay, updateCurrentDay]);
+
+  const confirmResetNutrition = useCallback(() => {
+    Alert.alert(
+      "Reset Nutrition?",
+      "This will clear the current nutrition logs and drafts for this day, then start a new day. Are you sure you want to proceed?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Proceed", onPress: resetNutritionForNewDay, style: "destructive" },
+      ],
+    );
+  }, [resetNutritionForNewDay]);
+
   const addCompletedDateForToday = useCallback(() => {
     const todayKey = formatDateKey(new Date());
     setCompletedDates((previousDates) => {
@@ -2687,9 +2722,17 @@ export default function App() {
           <Text style={styles.screenTitle}>Nutrition</Text>
           <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - {activeDay}, synced from Workouts.</Text>
         </View>
+        <TouchableOpacity activeOpacity={0.8} onPress={confirmResetNutrition} style={styles.nutritionResetButton}>
+          <Text style={styles.nutritionResetText}>Reset</Text>
+        </TouchableOpacity>
       </View>
 
       {renderStorageWarning()}
+      {nutritionResetNotice ? (
+        <View style={styles.nutritionResetNotice}>
+          <Text style={styles.nutritionResetNoticeText}>{nutritionResetNotice}</Text>
+        </View>
+      ) : null}
 
       <View style={styles.metricGrid}>
         <View style={[styles.metricCard, styles.metricCardWide]}>
@@ -4288,6 +4331,36 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
     marginTop: 6,
     paddingVertical: 5,
+  },
+  nutritionResetButton: {
+    alignItems: "center",
+    backgroundColor: surface,
+    borderColor: coral,
+    borderRadius: 10,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 40,
+    paddingHorizontal: 14,
+  },
+  nutritionResetText: {
+    color: coral,
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  nutritionResetNotice: {
+    backgroundColor: "rgba(47, 123, 255, 0.12)",
+    borderColor: accent,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  nutritionResetNoticeText: {
+    color: theme.strongText,
+    fontSize: 13,
+    fontWeight: "800",
   },
   caloriePanel: {
     backgroundColor: theme.surface,
