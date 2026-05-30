@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  FlatList,
   KeyboardAvoidingView,
   type ListRenderItemInfo,
   Modal,
@@ -20,21 +21,6 @@ import {
   View,
   type ViewStyle,
 } from "react-native";
-import { GestureHandlerRootView } from "react-native-gesture-handler";
-import Animated, {
-  Extrapolation,
-  FadeIn,
-  FadeOut,
-  interpolate,
-  Layout,
-  LinearTransition,
-  runOnJS,
-  useAnimatedScrollHandler,
-  useAnimatedStyle,
-  useSharedValue,
-  type SharedValue,
-  withTiming,
-} from "react-native-reanimated";
 
 type WorkoutDayName = "Push" | "Pull" | "Legs";
 type WeightUnit = "lbs" | "kg";
@@ -42,7 +28,6 @@ type CalorieLogType = "add" | "extract";
 type CalorieLogMode = "quick" | "macro";
 type AppTab = "Workouts" | "Nutrition" | "Weight" | "Stats" | "Settings";
 type GoalMode = "Bulk" | "Cut";
-type ThemeMode = "Light" | "Dark";
 type MacroTargetMode = "Auto" | "Custom";
 type NutritionMode = "Quick Calories" | "Macro Tracker";
 type MacroName = "protein" | "carbs" | "fats";
@@ -129,13 +114,11 @@ type TimerSettings = {
 };
 type AppSettings = {
   goalMode: GoalMode;
-  themeMode: ThemeMode;
   timerSettings: TimerSettings;
   macroTargetMode: MacroTargetMode;
   customMacroTargets: MacroDrafts;
 };
 type ThemeTokens = {
-  mode: ThemeMode;
   background: string;
   surface: string;
   text: string;
@@ -206,7 +189,7 @@ const REST_TIMER_PRESETS = [
 ];
 const IOS_KEYBOARD_VERTICAL_OFFSET = Platform.OS === "ios" ? 20 : 0;
 const KEYBOARD_DISMISS_MODE = Platform.OS === "ios" ? "interactive" : "on-drag";
-const SCREEN_TOP_PADDING = Platform.OS === "ios" ? 28 : 18;
+const SCREEN_TOP_PADDING = Platform.OS === "ios" ? 58 : 22;
 const SCREEN_BOTTOM_PADDING = Platform.OS === "ios" ? 44 : 28;
 const BOTTOM_TAB_BOTTOM_PADDING = Platform.OS === "ios" ? 26 : 10;
 const BAR_WEIGHT_KG = 20;
@@ -252,7 +235,6 @@ const EXTRA_DAY_PRESETS: Array<{ label: ExtraWorkoutDayPreset; baseDay: WorkoutD
 ];
 const DEFAULT_APP_SETTINGS: AppSettings = {
   goalMode: "Bulk",
-  themeMode: "Light",
   timerSettings: {
     enabled: true,
     duration: REST_SECONDS,
@@ -260,37 +242,20 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   macroTargetMode: "Auto",
   customMacroTargets: DEFAULT_MACRO_TARGETS,
 };
-const LIGHT_THEME: ThemeTokens = {
-  mode: "Light",
-  background: "#F8FAFC",
-  surface: "#FFFFFF",
-  text: "#000000",
-  strongText: "#0F172A",
-  mutedText: "#334155",
-  placeholder: "#64748B",
-  border: "#000000",
-  subtle: "#E2E8F0",
-  inverseText: "#FFFFFF",
-  positive: "#16A34A",
-  negative: "#DC2626",
-  neutral: "#64748B",
-  backdrop: "rgba(15, 23, 42, 0.32)",
-};
-const DARK_THEME: ThemeTokens = {
-  mode: "Dark",
+const APP_THEME: ThemeTokens = {
   background: "#000000",
-  surface: "#000000",
-  text: "#FFFFFF",
-  strongText: "#F8FAFC",
-  mutedText: "#CBD5E1",
-  placeholder: "#94A3B8",
-  border: "#FFFFFF",
-  subtle: "#1E293B",
+  surface: "#111111",
+  text: "#F5F5F5",
+  strongText: "#FFFFFF",
+  mutedText: "#9A9A9A",
+  placeholder: "#737373",
+  border: "#1E1E1E",
+  subtle: "#222222",
   inverseText: "#000000",
-  positive: "#22C55E",
-  negative: "#F87171",
-  neutral: "#94A3B8",
-  backdrop: "rgba(248, 250, 252, 0.22)",
+  positive: "#2F7BFF",
+  negative: "#FF5A5F",
+  neutral: "#7A7A7A",
+  backdrop: "rgba(0, 0, 0, 0.72)",
 };
 const STARTER_CALORIE_LOG_SIGNATURES = new Set([
   "add|620|2026-05-13T08:15:00.000Z",
@@ -310,11 +275,6 @@ const STARTER_CALORIE_LOG_SIGNATURES = new Set([
   "add|690|2026-05-24T09:30:00.000Z",
   "add|910|2026-05-24T15:15:00.000Z",
 ]);
-const SPRING_LAYOUT = Layout.springify().damping(18).stiffness(180);
-const LIST_LAYOUT = LinearTransition.springify().damping(18).stiffness(170);
-const LIST_ENTERING = FadeIn.duration(170);
-const LIST_EXITING = FadeOut.duration(130);
-
 const makeId = (prefix: string) =>
   `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
@@ -499,8 +459,6 @@ const formatRpeInput = (value: string) => {
 
   return String(Math.min(10, Math.max(1, Number(digits))));
 };
-
-const getThemeTokens = (mode: ThemeMode) => (mode === "Dark" ? DARK_THEME : LIGHT_THEME);
 
 const formatDateTime = (isoDate: string) => {
   const date = new Date(isoDate);
@@ -843,12 +801,10 @@ const normalizeTimerSettings = (value: unknown): TimerSettings => {
 const normalizeAppSettings = (value: unknown): AppSettings => {
   const record = asRecord(value);
   const goalMode = record?.goalMode === "Cut" ? "Cut" : "Bulk";
-  const themeMode = record?.themeMode === "Dark" ? "Dark" : "Light";
   const macroTargetMode = record?.macroTargetMode === "Custom" ? "Custom" : "Auto";
 
   return {
     goalMode,
-    themeMode,
     timerSettings: normalizeTimerSettings(record?.timerSettings),
     macroTargetMode,
     customMacroTargets: normalizeMacroDrafts(record?.customMacroTargets),
@@ -985,36 +941,17 @@ const normalizeWeeks = (value: unknown): WeekEntry[] | null => {
   });
 };
 
-type AppStyles = ReturnType<typeof createStyles>;
+type AppStyles = Record<string, any>;
 
 type BottomTabButtonProps = {
   activeTab: AppTab;
-  index: number;
   onPress: (tab: AppTab) => void;
-  pageWidth: number;
-  scrollX: SharedValue<number>;
   styles: AppStyles;
   tab: AppTab;
 };
 
-function BottomTabButton({ activeTab, index, onPress, pageWidth, scrollX, styles, tab }: BottomTabButtonProps) {
-  const inputRange = useMemo(
-    () => [(index - 1) * pageWidth, index * pageWidth, (index + 1) * pageWidth],
-    [index, pageWidth],
-  );
+function BottomTabButton({ activeTab, onPress, styles, tab }: BottomTabButtonProps) {
   const isActive = activeTab === tab;
-
-  const activeFillStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollX.value, inputRange, [0, 1, 0], Extrapolation.CLAMP),
-  }));
-
-  const inactiveLabelStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollX.value, inputRange, [1, 0, 1], Extrapolation.CLAMP),
-  }));
-
-  const activeLabelStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(scrollX.value, inputRange, [0, 1, 0], Extrapolation.CLAMP),
-  }));
 
   return (
     <TouchableOpacity
@@ -1022,20 +959,11 @@ function BottomTabButton({ activeTab, index, onPress, pageWidth, scrollX, styles
       accessibilityState={{ selected: isActive }}
       activeOpacity={0.85}
       onPress={() => onPress(tab)}
-      style={styles.bottomTabButton}
+      style={[styles.bottomTabButton, isActive && styles.activeBottomTabButton]}
     >
-      <Animated.View pointerEvents="none" style={[styles.bottomTabActiveFill, activeFillStyle]} />
-      <View style={styles.bottomTabLabelStack}>
-        <Animated.Text numberOfLines={1} style={[styles.bottomTabText, inactiveLabelStyle]}>
-          {tab}
-        </Animated.Text>
-        <Animated.Text
-          numberOfLines={1}
-          style={[styles.bottomTabText, styles.activeBottomTabText, styles.bottomTabLabelOverlay, activeLabelStyle]}
-        >
-          {tab}
-        </Animated.Text>
-      </View>
+      <Text numberOfLines={1} style={[styles.bottomTabText, isActive && styles.activeBottomTabText]}>
+        {tab}
+      </Text>
     </TouchableOpacity>
   );
 }
@@ -1049,49 +977,167 @@ type SmoothModalProps = {
 };
 
 function SmoothModal({ backdropStyle, cardStyle, children, onRequestClose, visible }: SmoothModalProps) {
-  const [isMounted, setIsMounted] = useState(visible);
-  const [renderedChildren, setRenderedChildren] = useState(children);
-  const progress = useSharedValue(visible ? 1 : 0);
-
-  useEffect(() => {
-    if (visible) {
-      setRenderedChildren(children);
-      setIsMounted(true);
-      progress.value = withTiming(1, { duration: 190 });
-      return;
-    }
-
-    progress.value = withTiming(0, { duration: 150 }, (finished) => {
-      if (finished) {
-        runOnJS(setIsMounted)(false);
-      }
-    });
-  }, [children, progress, visible]);
-
-  const animatedBackdropStyle = useAnimatedStyle(() => ({
-    opacity: progress.value,
-  }));
-
-  const animatedCardStyle = useAnimatedStyle(() => ({
-    opacity: progress.value,
-    transform: [
-      { translateY: interpolate(progress.value, [0, 1], [18, 0], Extrapolation.CLAMP) },
-      { scale: interpolate(progress.value, [0, 1], [0.965, 1], Extrapolation.CLAMP) },
-    ],
-  }));
-
-  if (!isMounted) {
-    return null;
-  }
-
   return (
-    <Modal animationType="none" transparent visible={isMounted} onRequestClose={onRequestClose}>
-      <Animated.View style={[backdropStyle, animatedBackdropStyle]}>
-        <Animated.View style={[cardStyle, animatedCardStyle]}>{renderedChildren}</Animated.View>
-      </Animated.View>
+    <Modal animationType="fade" transparent visible={visible} onRequestClose={onRequestClose}>
+      <View style={backdropStyle}>
+        <View style={cardStyle}>{children}</View>
+      </View>
     </Modal>
   );
 }
+
+type WorkoutSetRowProps = {
+  completed: boolean;
+  exerciseId: string;
+  exerciseName: string;
+  onAdjustSetWeight: (exerciseId: string, setId: string, deltaKg: number, fallbackWeight?: string) => void;
+  onOpenPlateCalculator: (exerciseName: string, weight: string) => void;
+  onRemoveSet: (exerciseId: string, setId: string) => void;
+  onToggleSetComplete: (setId: string) => void;
+  onUpdateSet: (
+    exerciseId: string,
+    setId: string,
+    field: keyof Pick<WorkoutSet, "weight" | "reps" | "rpe">,
+    value: string,
+  ) => void;
+  previousLabel: string;
+  previousSetWeight?: string;
+  progressStatus: SetProgressStatus;
+  set: WorkoutSet;
+  setIndex: number;
+  styles: AppStyles;
+};
+
+const WorkoutSetRow = React.memo(function WorkoutSetRow({
+  completed,
+  exerciseId,
+  exerciseName,
+  onAdjustSetWeight,
+  onOpenPlateCalculator,
+  onRemoveSet,
+  onToggleSetComplete,
+  onUpdateSet,
+  previousLabel,
+  previousSetWeight,
+  progressStatus,
+  set,
+  setIndex,
+  styles,
+}: WorkoutSetRowProps) {
+  const isMaxEffort = completed && safeNumber(set.rpe) >= 10;
+  const progressBadgeStyle =
+    progressStatus.tone === "positive"
+      ? styles.positiveProgressBadge
+      : progressStatus.tone === "negative"
+        ? styles.negativeProgressBadge
+        : styles.neutralProgressBadge;
+  const progressTextStyle =
+    progressStatus.tone === "positive"
+      ? styles.positiveProgressText
+      : progressStatus.tone === "negative"
+        ? styles.negativeProgressText
+        : styles.neutralProgressText;
+
+  return (
+    <View style={styles.setRow}>
+      <View style={styles.setMainRow}>
+        <Text style={styles.setNumber}>S{setIndex + 1}</Text>
+        <TextInput
+          blurOnSubmit={false}
+          key={`${set.id}-weight`}
+          keyboardType="decimal-pad"
+          onChangeText={(value) => onUpdateSet(exerciseId, set.id, "weight", value)}
+          placeholder="KG"
+          placeholderTextColor="#777777"
+          style={styles.setWeightInput}
+          value={set.weight}
+        />
+        <TextInput
+          blurOnSubmit={false}
+          key={`${set.id}-reps`}
+          keyboardType="number-pad"
+          onChangeText={(value) => onUpdateSet(exerciseId, set.id, "reps", value)}
+          placeholder="Reps"
+          placeholderTextColor="#777777"
+          style={styles.setInput}
+          value={set.reps}
+        />
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => onToggleSetComplete(set.id)}
+          style={[styles.doneSetButton, completed && styles.doneSetButtonActive]}
+        >
+          <Text style={[styles.doneSetText, completed && styles.doneSetTextActive]}>DONE</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => onRemoveSet(exerciseId, set.id)}
+          style={styles.removeSetButton}
+        >
+          <Text style={styles.removeSetText}>✕</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={styles.setUtilityRow}>
+        <View style={styles.rpeControl}>
+          <Text style={styles.utilityLabel}>RPE</Text>
+          <TextInput
+            blurOnSubmit={false}
+            key={`${set.id}-rpe`}
+            keyboardType="number-pad"
+            maxLength={2}
+            onChangeText={(value) => onUpdateSet(exerciseId, set.id, "rpe", value)}
+            placeholder="RPE"
+            placeholderTextColor="#777777"
+            style={styles.rpeInput}
+            value={set.rpe}
+          />
+        </View>
+        <View style={styles.weightQuickActions}>
+          <TouchableOpacity
+            activeOpacity={0.76}
+            delayLongPress={260}
+            onLongPress={() => onAdjustSetWeight(exerciseId, set.id, -QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSetWeight)}
+            onPress={() => onAdjustSetWeight(exerciseId, set.id, -QUICK_WEIGHT_TAP_STEP_KG, previousSetWeight)}
+            style={styles.weightQuickButton}
+          >
+            <Text style={styles.weightQuickText}>-</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            activeOpacity={0.76}
+            delayLongPress={260}
+            onLongPress={() => onAdjustSetWeight(exerciseId, set.id, QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSetWeight)}
+            onPress={() => onAdjustSetWeight(exerciseId, set.id, QUICK_WEIGHT_TAP_STEP_KG, previousSetWeight)}
+            style={styles.weightQuickButton}
+          >
+            <Text style={styles.weightQuickText}>+</Text>
+          </TouchableOpacity>
+        </View>
+        <TouchableOpacity activeOpacity={0.8} onPress={() => onOpenPlateCalculator(exerciseName, set.weight)} style={styles.plateMiniButton}>
+          <Text style={styles.plateMiniButtonText}>Plates</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={styles.previousLine}>
+        <Text style={styles.previousLineLabel}>Previous</Text>
+        <View style={styles.previousBadge}>
+          <Text numberOfLines={1} style={styles.previousBadgeText}>
+            {previousLabel}
+          </Text>
+        </View>
+        <View style={[styles.progressBadge, progressBadgeStyle]}>
+          <Text style={[styles.progressSymbol, progressTextStyle]}>{progressStatus.symbol}</Text>
+          <Text numberOfLines={1} style={[styles.progressLabel, progressTextStyle]}>
+            {progressStatus.label}
+          </Text>
+        </View>
+      </View>
+      {isMaxEffort ? (
+        <View style={styles.maxEffortBadge}>
+          <Text style={styles.maxEffortText}>Max Effort</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+});
 
 export default function App() {
   const [weeks, setWeeks] = useState<WeekEntry[]>(MOCK_WEEKS);
@@ -1113,7 +1159,6 @@ export default function App() {
   const [isAddDayModalVisible, setIsAddDayModalVisible] = useState(false);
   const [customDayName, setCustomDayName] = useState("");
   const [goalMode, setGoalMode] = useState<GoalMode>(DEFAULT_APP_SETTINGS.goalMode);
-  const [themeMode, setThemeMode] = useState<ThemeMode>(DEFAULT_APP_SETTINGS.themeMode);
   const [timerSettings, setTimerSettings] = useState<TimerSettings>({
     ...DEFAULT_APP_SETTINGS.timerSettings,
   });
@@ -1129,8 +1174,6 @@ export default function App() {
   const tabPagerRef = useRef<ScrollView>(null);
   const { width: windowWidth } = useWindowDimensions();
   const pageWidth = Math.max(1, windowWidth);
-  const previousPageWidthRef = useRef(pageWidth);
-  const tabScrollX = useSharedValue(0);
   const todayDateKey = useMemo(() => formatDateKey(new Date()), []);
 
   const currentWeek = weeks[activeWeekIndex] ?? weeks[0];
@@ -1146,27 +1189,8 @@ export default function App() {
     : activeExtraWorkoutDay?.baseDay ?? activeDay;
   const currentWorkoutDay = activeExtraWorkoutDay ?? currentWeek.days[activeWorkoutBaseDay];
   const currentWorkoutDayLabel = activeExtraWorkoutDay?.label ?? activeWorkoutBaseDay;
-  const theme = useMemo(() => getThemeTokens(themeMode), [themeMode]);
-  const styles = useMemo(() => createStyles(theme), [theme]);
-  const activeTabIndex = useMemo(() => Math.max(0, APP_TABS.indexOf(activeTab)), [activeTab]);
-  const tabScrollHandler = useAnimatedScrollHandler({
-    onScroll: (event) => {
-      tabScrollX.value = event.contentOffset.x;
-    },
-  });
-
-  useEffect(() => {
-    if (previousPageWidthRef.current === pageWidth) {
-      return;
-    }
-
-    previousPageWidthRef.current = pageWidth;
-    const nextOffset = activeTabIndex * pageWidth;
-    tabScrollX.value = nextOffset;
-    requestAnimationFrame(() => {
-      tabPagerRef.current?.scrollTo({ animated: false, x: nextOffset, y: 0 });
-    });
-  }, [activeTabIndex, pageWidth, tabScrollX]);
+  const theme = APP_THEME;
+  const styles = useMemo(() => createStyles(APP_THEME), []);
 
   useEffect(() => {
     let isMounted = true;
@@ -1212,7 +1236,6 @@ export default function App() {
         if (savedAppSettings && isMounted) {
           const normalizedSettings = normalizeAppSettings(JSON.parse(savedAppSettings));
           setGoalMode(normalizedSettings.goalMode);
-          setThemeMode(normalizedSettings.themeMode);
           setTimerSettings(normalizedSettings.timerSettings);
           setTimerDurationDraft(String(normalizedSettings.timerSettings.duration));
           setMacroTargetMode(normalizedSettings.macroTargetMode);
@@ -1300,7 +1323,6 @@ export default function App() {
 
     const nextSettings: AppSettings = {
       goalMode,
-      themeMode,
       timerSettings,
       macroTargetMode,
       customMacroTargets,
@@ -1309,7 +1331,7 @@ export default function App() {
     AsyncStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings)).catch(() => {
       setStorageError("Settings could not be saved to this device.");
     });
-  }, [customMacroTargets, goalMode, hasLoadedStorage, macroTargetMode, themeMode, timerSettings]);
+  }, [customMacroTargets, goalMode, hasLoadedStorage, macroTargetMode, timerSettings]);
 
   useEffect(() => {
     if (!hasLoadedStorage || !currentWeek) {
@@ -2310,7 +2332,7 @@ export default function App() {
   const renderMacroBar = useCallback((macroName: MacroName) => {
     const target = safeNumber(macroTargets[macroName]);
     return (
-      <Animated.View entering={LIST_ENTERING} layout={SPRING_LAYOUT} key={macroName} style={styles.macroCard}>
+      <View key={macroName} style={styles.macroCard}>
         <View style={styles.macroHeader}>
           <Text style={styles.macroTitle}>{MACRO_LABELS[macroName]}</Text>
           <Text style={styles.macroMeta}>
@@ -2331,7 +2353,7 @@ export default function App() {
             value={macroTargets[macroName]}
           />
         </View>
-      </Animated.View>
+      </View>
     );
   }, [macroProgress, macroTargetMode, macroTargets, macroTotals, styles, theme.placeholder, updateMacroTarget]);
 
@@ -2482,10 +2504,10 @@ export default function App() {
 
   const renderWorkoutEmpty = useCallback(
     () => (
-      <Animated.View entering={LIST_ENTERING} layout={SPRING_LAYOUT} style={styles.emptyState}>
+      <View style={styles.emptyState}>
         <Text style={styles.emptyTitle}>No exercises yet</Text>
         <Text style={styles.emptyBody}>Add your first movement and start logging quality work.</Text>
-      </Animated.View>
+      </View>
     ),
     [styles],
   );
@@ -2497,10 +2519,7 @@ export default function App() {
       const isSwipeOpen = swipedExerciseId === exercise.id;
 
       return (
-        <Animated.View
-          entering={LIST_ENTERING}
-          exiting={LIST_EXITING}
-          layout={SPRING_LAYOUT}
+        <View
           onTouchCancel={() => {
             exerciseSwipeStartRef.current = null;
           }}
@@ -2509,13 +2528,14 @@ export default function App() {
           style={styles.exerciseSwipeFrame}
         >
           {isSwipeOpen ? (
-            <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.swipeActionRail}>
+            <View style={styles.swipeActionRail}>
               <TouchableOpacity activeOpacity={0.82} onPress={() => removeExercise(exercise.id)} style={styles.swipeDeleteButton}>
                 <Text style={styles.swipeDeleteText}>Delete</Text>
               </TouchableOpacity>
-            </Animated.View>
+            </View>
           ) : null}
-          <Animated.View layout={SPRING_LAYOUT} style={[styles.exerciseCard, isSwipeOpen && styles.exerciseCardSwiped]}>
+          <View style={[styles.exerciseCard, isSwipeOpen && styles.exerciseCardSwiped]}>
+            <View style={styles.exerciseAccentLine} />
             <View style={styles.exerciseHeader}>
               <View style={styles.exerciseTitleWrap}>
                 <TextInput
@@ -2564,9 +2584,8 @@ export default function App() {
 
             <View style={styles.setHeaderRow}>
               <Text style={styles.setHeaderIndex}>Set</Text>
-              <Text style={styles.setHeaderText}>Weight</Text>
-              <Text style={styles.setHeaderText}>Reps</Text>
-              <Text style={styles.setHeaderRpe}>RPE</Text>
+              <Text style={styles.setHeaderWeight}>KG</Text>
+              <Text style={styles.setHeaderReps}>Reps</Text>
               <Text style={styles.setHeaderDone}>Done</Text>
               <Text style={styles.setHeaderDelete}>Del</Text>
             </View>
@@ -2574,123 +2593,25 @@ export default function App() {
             {exercise.sets.map((set, setIndex) => {
               const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
               const progressStatus = setProgressStatus(exercise, exerciseIndex, setIndex, set);
-              const isMaxEffort = Boolean(completedSets[set.id]) && safeNumber(set.rpe) >= 10;
-              const weightPlaceholder = previousSetPlaceholder(exercise, exerciseIndex, setIndex, "weight");
-              const repsPlaceholder = previousSetPlaceholder(exercise, exerciseIndex, setIndex, "reps");
-              const progressBadgeStyle =
-                progressStatus.tone === "positive"
-                  ? styles.positiveProgressBadge
-                  : progressStatus.tone === "negative"
-                    ? styles.negativeProgressBadge
-                    : styles.neutralProgressBadge;
-              const progressTextStyle =
-                progressStatus.tone === "positive"
-                  ? styles.positiveProgressText
-                  : progressStatus.tone === "negative"
-                    ? styles.negativeProgressText
-                    : styles.neutralProgressText;
 
               return (
-                <Animated.View
-                  entering={LIST_ENTERING}
-                  exiting={LIST_EXITING}
+                <WorkoutSetRow
+                  completed={Boolean(completedSets[set.id])}
+                  exerciseId={exercise.id}
+                  exerciseName={exercise.name}
                   key={set.id}
-                  layout={SPRING_LAYOUT}
-                  style={styles.setRow}
-                >
-                  <View style={styles.setMainRow}>
-                    <Text style={styles.setNumber}>{setIndex + 1}</Text>
-                    <View style={styles.setWeightCell}>
-                      <TextInput
-                        keyboardType="decimal-pad"
-                        onChangeText={(value) => updateSet(exercise.id, set.id, "weight", value)}
-                        onFocus={() => openPlateCalculator(exercise.name, set.weight)}
-                        onPressIn={() => openPlateCalculator(exercise.name, set.weight)}
-                        placeholder={weightPlaceholder}
-                        placeholderTextColor={theme.placeholder}
-                        style={styles.setWeightInput}
-                        value={set.weight}
-                      />
-                      <View style={styles.weightQuickActions}>
-                        <TouchableOpacity
-                          activeOpacity={0.76}
-                          delayLongPress={260}
-                          onLongPress={() =>
-                            adjustSetWeight(exercise.id, set.id, -QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSet?.weight)
-                          }
-                          onPress={() => adjustSetWeight(exercise.id, set.id, -QUICK_WEIGHT_TAP_STEP_KG, previousSet?.weight)}
-                          style={styles.weightQuickButton}
-                        >
-                          <Text style={styles.weightQuickText}>-</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          activeOpacity={0.76}
-                          delayLongPress={260}
-                          onLongPress={() =>
-                            adjustSetWeight(exercise.id, set.id, QUICK_WEIGHT_LONG_PRESS_STEP_KG, previousSet?.weight)
-                          }
-                          onPress={() => adjustSetWeight(exercise.id, set.id, QUICK_WEIGHT_TAP_STEP_KG, previousSet?.weight)}
-                          style={styles.weightQuickButton}
-                        >
-                          <Text style={styles.weightQuickText}>+</Text>
-                        </TouchableOpacity>
-                      </View>
-                      <TouchableOpacity activeOpacity={0.8} onPress={() => openPlateCalculator(exercise.name, set.weight)} style={styles.plateMiniButton}>
-                        <Text style={styles.plateMiniButtonText}>kg</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <TextInput
-                      keyboardType="number-pad"
-                      onChangeText={(value) => updateSet(exercise.id, set.id, "reps", value)}
-                      placeholder={repsPlaceholder}
-                      placeholderTextColor={theme.placeholder}
-                      style={styles.setInput}
-                      value={set.reps}
-                    />
-                    <TextInput
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      onChangeText={(value) => updateSet(exercise.id, set.id, "rpe", value)}
-                      placeholder="1-10"
-                      placeholderTextColor={theme.placeholder}
-                      style={styles.rpeInput}
-                      value={set.rpe}
-                    />
-                    <TouchableOpacity
-                      activeOpacity={0.8}
-                      onPress={() => toggleSetComplete(set.id)}
-                      style={[styles.doneSetButton, completedSets[set.id] && styles.doneSetButtonActive]}
-                    >
-                      <Text style={[styles.doneSetText, completedSets[set.id] && styles.doneSetTextActive]}>✓</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      activeOpacity={0.8}
-                      onPress={() => removeSet(exercise.id, set.id)}
-                      style={styles.removeSetButton}
-                    >
-                      <Text style={styles.removeSetText}>X</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <View style={styles.previousLine}>
-                    <Text style={styles.previousLineLabel}>Previous</Text>
-                    <View style={styles.previousBadge}>
-                      <Text numberOfLines={1} style={styles.previousBadgeText}>
-                        {previousSetLabel(exercise, exerciseIndex, setIndex)}
-                      </Text>
-                    </View>
-                    <View style={[styles.progressBadge, progressBadgeStyle]}>
-                      <Text style={[styles.progressSymbol, progressTextStyle]}>{progressStatus.symbol}</Text>
-                      <Text numberOfLines={1} style={[styles.progressLabel, progressTextStyle]}>
-                        {progressStatus.label}
-                      </Text>
-                    </View>
-                  </View>
-                  {isMaxEffort ? (
-                    <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.maxEffortBadge}>
-                      <Text style={styles.maxEffortText}>🔥 Max Effort</Text>
-                    </Animated.View>
-                  ) : null}
-                </Animated.View>
+                  onAdjustSetWeight={adjustSetWeight}
+                  onOpenPlateCalculator={openPlateCalculator}
+                  onRemoveSet={removeSet}
+                  onToggleSetComplete={toggleSetComplete}
+                  onUpdateSet={updateSet}
+                  previousLabel={previousSetLabel(exercise, exerciseIndex, setIndex)}
+                  previousSetWeight={previousSet?.weight}
+                  progressStatus={progressStatus}
+                  set={set}
+                  setIndex={setIndex}
+                  styles={styles}
+                />
               );
             })}
 
@@ -2707,8 +2628,8 @@ export default function App() {
                 <Text style={styles.outlineButtonText}>Same Last Week</Text>
               </TouchableOpacity>
             </View>
-          </Animated.View>
-        </Animated.View>
+          </View>
+        </View>
       );
     },
     [
@@ -2725,13 +2646,11 @@ export default function App() {
       moveExercise,
       openPlateCalculator,
       previousSetLabel,
-      previousSetPlaceholder,
       removeExercise,
       removeSet,
       setProgressStatus,
       styles,
       swipedExerciseId,
-      theme.placeholder,
       toggleSetComplete,
       updateExercise,
       updateSet,
@@ -2739,13 +2658,12 @@ export default function App() {
   );
 
   const renderWorkoutTab = () => (
-    <Animated.FlatList<ExerciseEntry>
+    <FlatList<ExerciseEntry>
       automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
       bounces
       contentContainerStyle={styles.screenContent}
       data={currentWorkoutDay.exercises}
       initialNumToRender={4}
-      itemLayoutAnimation={LIST_LAYOUT}
       keyboardDismissMode={KEYBOARD_DISMISS_MODE}
       keyboardShouldPersistTaps="handled"
       keyExtractor={exerciseKeyExtractor}
@@ -2777,6 +2695,8 @@ export default function App() {
         <View style={[styles.metricCard, styles.metricCardWide]}>
           <Text style={styles.labelText}>Target</Text>
           <TextInput
+            blurOnSubmit={false}
+            key={`${activeDay}-calorie-target`}
             keyboardType="number-pad"
             onChangeText={updateCalorieTarget}
             placeholder="2500"
@@ -2811,6 +2731,8 @@ export default function App() {
             <Text style={styles.calorieInputLabel}>Add Calories</Text>
             <View style={styles.calorieInputRow}>
               <TextInput
+                blurOnSubmit={false}
+                key={`${activeDay}-quick-add-calories`}
                 keyboardType="number-pad"
                 onChangeText={(value) => setQuickCalorieDraft("add", value)}
                 placeholder="+250"
@@ -2828,6 +2750,8 @@ export default function App() {
             <Text style={styles.calorieInputLabel}>Subtract Calories</Text>
             <View style={styles.calorieInputRow}>
               <TextInput
+                blurOnSubmit={false}
+                key={`${activeDay}-quick-extract-calories`}
                 keyboardType="number-pad"
                 onChangeText={(value) => setQuickCalorieDraft("extract", value)}
                 placeholder="-100"
@@ -2857,6 +2781,8 @@ export default function App() {
             <View style={styles.calorieInputBlock}>
               <Text style={styles.calorieInputLabel}>Food</Text>
               <TextInput
+                blurOnSubmit={false}
+                key={`${activeDay}-food-name`}
                 onChangeText={(value) => setCalorieDraft("name", value)}
                 placeholder="Food name"
                 placeholderTextColor={theme.placeholder}
@@ -2867,6 +2793,8 @@ export default function App() {
             <View style={styles.calorieInputBlock}>
               <Text style={styles.calorieInputLabel}>Calories</Text>
               <TextInput
+                blurOnSubmit={false}
+                key={`${activeDay}-food-calories`}
                 keyboardType="number-pad"
                 onChangeText={(value) => setCalorieDraft("calories", value)}
                 placeholder="500"
@@ -2880,6 +2808,8 @@ export default function App() {
                 <View key={macroName} style={styles.foodMacroInputBlock}>
                   <Text style={styles.calorieInputLabel}>{MACRO_LABELS[macroName]}</Text>
                   <TextInput
+                    blurOnSubmit={false}
+                    key={`${activeDay}-food-${macroName}`}
                     keyboardType="number-pad"
                     onChangeText={(value) => setCalorieDraft(macroName, value)}
                     placeholder="0g"
@@ -2906,9 +2836,9 @@ export default function App() {
 
   const renderNutritionEmpty = useCallback(
     () => (
-      <Animated.Text entering={LIST_ENTERING} style={styles.noHistoryText}>
+      <Text style={styles.noHistoryText}>
         {nutritionMode === "Quick Calories" ? "No quick calorie logs yet." : "No macro meals logged yet."}
-      </Animated.Text>
+      </Text>
     ),
     [nutritionMode, styles.noHistoryText],
   );
@@ -2917,7 +2847,7 @@ export default function App() {
     ({ item: log }: ListRenderItemInfo<CalorieLog>) => {
       if (nutritionMode === "Quick Calories") {
         return (
-          <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.historyRow}>
+          <View style={styles.historyRow}>
             <View style={[styles.historyTypeDot, log.type === "extract" && styles.extractDot]} />
             <View style={styles.historyCopy}>
               <Text style={styles.historyMain}>
@@ -2929,13 +2859,13 @@ export default function App() {
             <TouchableOpacity activeOpacity={0.75} onPress={() => deleteCalorieLog(log.id)} style={styles.deleteLogButton}>
               <Text style={styles.deleteLogText}>Delete</Text>
             </TouchableOpacity>
-          </Animated.View>
+          </View>
         );
       }
 
       const logMacros = log.macros ?? EMPTY_MACROS;
       return (
-        <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.historyRow}>
+        <View style={styles.historyRow}>
           <View style={styles.historyTypeDot} />
           <View style={styles.historyCopy}>
             <Text style={styles.historyMain}>
@@ -2948,25 +2878,24 @@ export default function App() {
           <TouchableOpacity activeOpacity={0.75} onPress={() => deleteCalorieLog(log.id)} style={styles.deleteLogButton}>
             <Text style={styles.deleteLogText}>Delete</Text>
           </TouchableOpacity>
-        </Animated.View>
+        </View>
       );
     },
     [deleteCalorieLog, nutritionMode, styles],
   );
 
   const renderNutritionTab = () => (
-    <Animated.FlatList<CalorieLog>
+    <FlatList<CalorieLog>
       automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
       bounces
       contentContainerStyle={styles.screenContent}
       data={nutritionLogs}
       initialNumToRender={8}
-      itemLayoutAnimation={LIST_LAYOUT}
-      keyboardDismissMode={KEYBOARD_DISMISS_MODE}
-      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="none"
+      keyboardShouldPersistTaps="always"
       keyExtractor={nutritionLogKeyExtractor}
       ListEmptyComponent={renderNutritionEmpty}
-      ListHeaderComponent={renderNutritionHeader}
+      ListHeaderComponent={renderNutritionHeader()}
       maxToRenderPerBatch={8}
       removeClippedSubviews={Platform.OS === "android"}
       renderItem={renderNutritionLogItem}
@@ -3060,7 +2989,7 @@ export default function App() {
 
   const renderWeightHistoryItem = useCallback(
     ({ item }: ListRenderItemInfo<WeightHistoryItem>) => (
-      <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} layout={SPRING_LAYOUT} style={styles.weightHistoryRow}>
+      <View style={styles.weightHistoryRow}>
         <View>
           <Text style={styles.weightHistoryWeek}>Week {item.week.weekNumber}</Text>
           <Text style={styles.weightHistoryMeta}>{formatWeightEntryDate(weeks.length, item.originalIndex)}</Text>
@@ -3068,19 +2997,18 @@ export default function App() {
         <Text style={styles.weightHistoryValue}>
           {item.week.bodyweight.value ? `${item.week.bodyweight.value} ${item.week.bodyweight.unit}` : "--"}
         </Text>
-      </Animated.View>
+      </View>
     ),
     [styles, weeks.length],
   );
 
   const renderWeightTab = () => (
-    <Animated.FlatList<WeightHistoryItem>
+    <FlatList<WeightHistoryItem>
       automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
       bounces
       contentContainerStyle={styles.screenContent}
       data={weightHistory}
       initialNumToRender={8}
-      itemLayoutAnimation={LIST_LAYOUT}
       keyboardDismissMode={KEYBOARD_DISMISS_MODE}
       keyboardShouldPersistTaps="handled"
       keyExtractor={weightHistoryKeyExtractor}
@@ -3148,7 +3076,7 @@ export default function App() {
           <Text style={styles.noHistoryText}>No personal records yet.</Text>
         ) : (
           personalRecords.map((record) => (
-            <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} key={`${record.exerciseName}-${record.weekNumber}`} layout={SPRING_LAYOUT} style={styles.prRow}>
+            <View key={`${record.exerciseName}-${record.weekNumber}`} style={styles.prRow}>
               <View style={styles.prCopy}>
                 <Text style={styles.prExercise}>{record.exerciseName}</Text>
                 <Text style={styles.prMeta}>Week {record.weekNumber}</Text>
@@ -3156,7 +3084,7 @@ export default function App() {
               <Text style={styles.prValue}>
                 {record.weight}{record.unit} x {record.reps} reps
               </Text>
-            </Animated.View>
+            </View>
           ))
         )}
       </View>
@@ -3170,11 +3098,11 @@ export default function App() {
           {weeklyVolumeData.map((entry) => {
             const height = Math.max(18, (entry.volume / maxWeeklyVolume) * 150);
             return (
-              <Animated.View key={entry.weekNumber} layout={SPRING_LAYOUT} style={styles.volumeBarColumn}>
+              <View key={entry.weekNumber} style={styles.volumeBarColumn}>
                 <Text style={styles.volumeValue}>{Math.round(entry.volume)}</Text>
                 <View style={[styles.volumeBar, { height }]} />
                 <Text style={styles.volumeLabel}>W{entry.weekNumber}</Text>
-              </Animated.View>
+              </View>
             );
           })}
         </View>
@@ -3183,10 +3111,10 @@ export default function App() {
       <View style={styles.chartCard}>
         <Text style={styles.historyTitle}>Estimated 1RM Snapshot</Text>
         {currentOneRepMaxSnapshot.map((exercise) => (
-          <Animated.View entering={LIST_ENTERING} exiting={LIST_EXITING} key={exercise.id} layout={SPRING_LAYOUT} style={styles.oneRmRow}>
+          <View key={exercise.id} style={styles.oneRmRow}>
             <Text style={styles.oneRmName}>{exercise.name}</Text>
             <Text style={styles.oneRmValue}>{Math.round(exercise.oneRepMax) || "--"} {currentWeek.bodyweight.unit}</Text>
-          </Animated.View>
+          </View>
         ))}
       </View>
     </ScrollView>
@@ -3222,7 +3150,7 @@ export default function App() {
       <View style={styles.heroHeader}>
         <View>
           <Text style={styles.screenTitle}>Settings</Text>
-          <Text style={styles.screenSubtitle}>Goals, appearance, and rest timer.</Text>
+          <Text style={styles.screenSubtitle}>Goals, macros, and rest timer.</Text>
         </View>
       </View>
 
@@ -3234,15 +3162,6 @@ export default function App() {
         <View style={styles.segmentControl}>
           {renderSegmentOption<GoalMode>("Bulk", goalMode, setGoalMode, "Bulk")}
           {renderSegmentOption<GoalMode>("Cut", goalMode, setGoalMode, "Cut")}
-        </View>
-      </View>
-
-      <View style={styles.settingsCard}>
-        <Text style={styles.sectionTitle}>Theme Mode</Text>
-        <Text style={styles.sectionSubtitle}>Changes the full app instantly.</Text>
-        <View style={styles.segmentControl}>
-          {renderSegmentOption<ThemeMode>("Light", themeMode, setThemeMode, "Light Mode")}
-          {renderSegmentOption<ThemeMode>("Dark", themeMode, setThemeMode, "Dark Mode")}
         </View>
       </View>
 
@@ -3362,9 +3281,9 @@ export default function App() {
   };
 
   return (
-    <GestureHandlerRootView style={styles.gestureRoot}>
+    <View style={styles.gestureRoot}>
       <View style={styles.safeArea}>
-        <StatusBar barStyle={themeMode === "Dark" ? "light-content" : "dark-content"} backgroundColor={theme.surface} />
+        <StatusBar barStyle="light-content" backgroundColor={theme.surface} />
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : undefined}
           keyboardVerticalOffset={IOS_KEYBOARD_VERTICAL_OFFSET}
@@ -3372,7 +3291,7 @@ export default function App() {
         >
           <View style={styles.appShell}>
             <View style={styles.contentArea}>
-              <Animated.ScrollView
+              <ScrollView
                 bounces={false}
                 contentContainerStyle={styles.tabPagerContent}
                 decelerationRate="fast"
@@ -3382,7 +3301,6 @@ export default function App() {
                 keyboardShouldPersistTaps="handled"
                 nestedScrollEnabled
                 onMomentumScrollEnd={handleTabMomentumEnd}
-                onScroll={tabScrollHandler}
                 onScrollEndDrag={handleTabScrollEndDrag}
                 overScrollMode="never"
                 pagingEnabled
@@ -3395,20 +3313,17 @@ export default function App() {
                     {renderTabPageContent(tab)}
                   </View>
                 ))}
-              </Animated.ScrollView>
+              </ScrollView>
             </View>
             {renderPlateModal()}
             {renderAddDayModal()}
 
             <View style={styles.bottomTabBar}>
-              {APP_TABS.map((tab, index) => (
+              {APP_TABS.map((tab) => (
                 <BottomTabButton
                   activeTab={activeTab}
-                  index={index}
                   key={tab}
                   onPress={handleTabPress}
-                  pageWidth={pageWidth}
-                  scrollX={tabScrollX}
                   styles={styles}
                   tab={tab}
                 />
@@ -3417,25 +3332,34 @@ export default function App() {
           </View>
         </KeyboardAvoidingView>
       </View>
-    </GestureHandlerRootView>
+    </View>
   );
 }
 
 function createStyles(theme: ThemeTokens) {
+  const accent = "#2F7BFF";
+  const doneGreen = "#22C55E";
+  const coral = "#FF5A5F";
+  const background = "#000000";
+  const surface = "#111111";
+  const surfaceElevated = "#151515";
+  const border = "#1E1E1E";
+  const inputBorder = "#333333";
+
   return StyleSheet.create({
   gestureRoot: {
     flex: 1,
   },
   safeArea: {
-    backgroundColor: theme.surface,
+    backgroundColor: background,
     flex: 1,
   },
   keyboardRoot: {
-    backgroundColor: theme.surface,
+    backgroundColor: background,
     flex: 1,
   },
   appShell: {
-    backgroundColor: theme.background,
+    backgroundColor: background,
     flex: 1,
   },
   contentArea: {
@@ -3448,8 +3372,8 @@ function createStyles(theme: ThemeTokens) {
     flex: 1,
   },
   screenContent: {
-    paddingHorizontal: 18,
-    paddingTop: SCREEN_TOP_PADDING,
+    paddingHorizontal: 20,
+    paddingTop: SCREEN_TOP_PADDING + 4,
     paddingBottom: SCREEN_BOTTOM_PADDING,
   },
   topBar: {
@@ -3459,14 +3383,16 @@ function createStyles(theme: ThemeTokens) {
     marginBottom: 16,
   },
   screenTitle: {
-    color: theme.text,
-    fontSize: 30,
+    color: theme.strongText,
+    fontSize: 32,
     fontWeight: "900",
+    letterSpacing: 0,
   },
   screenSubtitle: {
     color: theme.mutedText,
     fontSize: 13,
-    marginTop: 4,
+    fontWeight: "700",
+    marginTop: 6,
   },
   screenMeta: {
     borderColor: theme.border,
@@ -3498,15 +3424,15 @@ function createStyles(theme: ThemeTokens) {
     alignItems: "flex-start",
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 16,
+    marginBottom: 20,
   },
   weekPanel: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
-    marginBottom: 14,
-    padding: 14,
+    marginBottom: 16,
+    padding: 16,
   },
   weekSelector: {
     alignItems: "center",
@@ -3515,9 +3441,9 @@ function createStyles(theme: ThemeTokens) {
   },
   weekButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: "#151515",
+    borderColor: inputBorder,
+    borderRadius: 10,
     borderWidth: 1,
     minWidth: 68,
     paddingHorizontal: 12,
@@ -3532,9 +3458,10 @@ function createStyles(theme: ThemeTokens) {
     alignItems: "center",
   },
   labelText: {
-    color: theme.strongText,
+    color: theme.mutedText,
     fontSize: 12,
-    fontWeight: "800",
+    fontWeight: "900",
+    letterSpacing: 0,
     textTransform: "uppercase",
   },
   weekTitle: {
@@ -3545,23 +3472,23 @@ function createStyles(theme: ThemeTokens) {
   },
   addWeekButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 10,
     borderWidth: 1,
     marginTop: 12,
     paddingVertical: 12,
   },
   addWeekText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 14,
     fontWeight: "900",
   },
   deleteWeekButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 10,
     borderWidth: 1,
     marginTop: 10,
     paddingVertical: 12,
@@ -3573,9 +3500,9 @@ function createStyles(theme: ThemeTokens) {
   },
   timerPanel: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     flexDirection: "row",
     justifyContent: "space-between",
@@ -3583,7 +3510,8 @@ function createStyles(theme: ThemeTokens) {
     padding: 14,
   },
   activeTimerPanel: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   timerHint: {
     color: theme.mutedText,
@@ -3591,10 +3519,10 @@ function createStyles(theme: ThemeTokens) {
     marginTop: 3,
   },
   activeTimerText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   activeTimerSubtext: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   timerValue: {
     color: theme.text,
@@ -3602,7 +3530,7 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
   },
   activeTimerValue: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   timerRightBlock: {
     alignItems: "flex-end",
@@ -3632,9 +3560,9 @@ function createStyles(theme: ThemeTokens) {
     opacity: 0.35,
   },
   warningBanner: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 14,
     padding: 12,
@@ -3646,23 +3574,24 @@ function createStyles(theme: ThemeTokens) {
   },
   dayTabsContent: {
     gap: 10,
-    paddingBottom: 16,
+    paddingBottom: 18,
   },
   workoutTabsBlock: {
     marginBottom: 2,
   },
   dayTab: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 999,
     borderWidth: 1,
     minWidth: 104,
     paddingHorizontal: 18,
-    paddingVertical: 12,
+    paddingVertical: 11,
   },
   activeDayTab: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   extraDayTab: {
     minWidth: 128,
@@ -3673,13 +3602,13 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
   },
   activeDayTabText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   addDayButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 16,
     paddingVertical: 12,
@@ -3693,11 +3622,11 @@ function createStyles(theme: ThemeTokens) {
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 12,
+    marginBottom: 14,
   },
   sectionTitle: {
-    color: theme.text,
-    fontSize: 21,
+    color: theme.strongText,
+    fontSize: 22,
     fontWeight: "900",
   },
   sectionSubtitle: {
@@ -3707,40 +3636,40 @@ function createStyles(theme: ThemeTokens) {
   },
   addExerciseRow: {
     flexDirection: "row",
-    gap: 10,
-    marginBottom: 14,
+    gap: 12,
+    marginBottom: 16,
   },
   exerciseInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: inputBorder,
+    borderRadius: 12,
     borderWidth: 1,
     color: theme.text,
     flex: 1,
     fontSize: 15,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
   },
   primaryButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 12,
     borderWidth: 1,
     justifyContent: "center",
     minWidth: 70,
     paddingHorizontal: 14,
   },
   primaryButtonText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 14,
     fontWeight: "900",
   },
   emptyState: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     padding: 22,
   },
@@ -3770,9 +3699,9 @@ function createStyles(theme: ThemeTokens) {
   },
   swipeDeleteButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: coral,
+    borderColor: coral,
+    borderRadius: 12,
     borderWidth: 1,
     flex: 1,
     justifyContent: "center",
@@ -3784,11 +3713,18 @@ function createStyles(theme: ThemeTokens) {
     textTransform: "uppercase",
   },
   exerciseCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     padding: 14,
+  },
+  exerciseAccentLine: {
+    backgroundColor: accent,
+    borderRadius: 999,
+    height: 3,
+    marginBottom: 14,
+    width: 42,
   },
   exerciseCardSwiped: {
     transform: [{ translateX: -88 }],
@@ -3796,8 +3732,8 @@ function createStyles(theme: ThemeTokens) {
   exerciseHeader: {
     alignItems: "center",
     flexDirection: "row",
-    gap: 10,
-    marginBottom: 14,
+    gap: 12,
+    marginBottom: 16,
   },
   exerciseHeaderActions: {
     alignItems: "center",
@@ -3810,9 +3746,9 @@ function createStyles(theme: ThemeTokens) {
   },
   orderButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 10,
     borderWidth: 1,
     height: 36,
     justifyContent: "center",
@@ -3822,7 +3758,7 @@ function createStyles(theme: ThemeTokens) {
     opacity: 0.32,
   },
   orderButtonText: {
-    color: theme.text,
+    color: theme.strongText,
     fontSize: 15,
     fontWeight: "900",
   },
@@ -3830,30 +3766,30 @@ function createStyles(theme: ThemeTokens) {
     flex: 1,
   },
   exerciseNameInput: {
-    borderBottomColor: theme.border,
+    borderBottomColor: border,
     borderBottomWidth: 1,
-    color: theme.text,
+    color: theme.strongText,
     flex: 1,
     fontSize: 18,
     fontWeight: "900",
     paddingVertical: 8,
   },
   oneRepMaxText: {
-    color: theme.mutedText,
+    color: accent,
     fontSize: 12,
     fontWeight: "800",
     marginTop: 6,
   },
   removeExerciseButton: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 10,
     borderWidth: 1,
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
   removeText: {
-    color: theme.text,
+    color: coral,
     fontSize: 12,
     fontWeight: "900",
   },
@@ -3861,7 +3797,8 @@ function createStyles(theme: ThemeTokens) {
     alignItems: "center",
     flexDirection: "row",
     gap: 6,
-    marginBottom: 8,
+    marginBottom: 10,
+    paddingHorizontal: 2,
   },
   setHeaderIndex: {
     color: theme.mutedText,
@@ -3879,13 +3816,30 @@ function createStyles(theme: ThemeTokens) {
     textAlign: "center",
     textTransform: "uppercase",
   },
+  setHeaderWeight: {
+    color: theme.mutedText,
+    flex: 1,
+    fontSize: 11,
+    fontWeight: "900",
+    minWidth: 88,
+    textAlign: "center",
+    textTransform: "uppercase",
+  },
+  setHeaderReps: {
+    color: theme.mutedText,
+    fontSize: 11,
+    fontWeight: "900",
+    textAlign: "center",
+    textTransform: "uppercase",
+    width: 62,
+  },
   setHeaderRpe: {
     color: theme.mutedText,
     fontSize: 11,
     fontWeight: "900",
     textAlign: "center",
     textTransform: "uppercase",
-    width: 44,
+    width: 42,
   },
   setHeaderPrevious: {
     color: theme.mutedText,
@@ -3901,7 +3855,7 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
     textAlign: "center",
     textTransform: "uppercase",
-    width: 38,
+    width: 70,
   },
   setHeaderDelete: {
     color: theme.mutedText,
@@ -3909,110 +3863,132 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
     textAlign: "center",
     textTransform: "uppercase",
-    width: 32,
+    width: 38,
   },
   setRow: {
-    borderBottomColor: theme.subtle,
+    alignItems: "center",
+    borderBottomColor: "#242424",
     borderBottomWidth: 1,
-    gap: 8,
-    marginBottom: 10,
-    paddingBottom: 10,
+    gap: 10,
+    marginBottom: 12,
+    paddingBottom: 14,
+    width: "100%",
   },
   setMainRow: {
     alignItems: "center",
     flexDirection: "row",
     gap: 6,
+    minHeight: 48,
+    width: "100%",
   },
   setNumber: {
     color: theme.text,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "900",
+    lineHeight: 18,
     textAlign: "center",
     width: 28,
   },
   setInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
+    backgroundColor: "#111111",
+    borderColor: inputBorder,
     borderRadius: 8,
     borderWidth: 1,
-    color: theme.text,
-    fontSize: 15,
-    fontWeight: "800",
-    height: 42,
-    paddingHorizontal: 9,
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "900",
+    height: 46,
+    paddingHorizontal: 10,
+    paddingVertical: 0,
     textAlign: "center",
-    width: 54,
+    width: 62,
   },
   rpeInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
+    backgroundColor: "#111111",
+    borderColor: inputBorder,
     borderRadius: 8,
     borderWidth: 1,
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: "800",
-    height: 42,
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
+    height: 36,
     paddingHorizontal: 6,
+    paddingVertical: 0,
     textAlign: "center",
-    width: 44,
-  },
-  setWeightCell: {
-    flex: 1.4,
-    flexDirection: "row",
-    gap: 3,
+    width: 50,
   },
   setWeightInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
+    backgroundColor: "#111111",
+    borderColor: inputBorder,
     borderRadius: 8,
     borderWidth: 1,
-    color: theme.text,
+    color: "#FFFFFF",
     flex: 1,
-    fontSize: 13,
-    fontWeight: "800",
-    height: 42,
-    paddingHorizontal: 5,
+    fontSize: 15,
+    fontWeight: "900",
+    height: 46,
+    minWidth: 88,
+    paddingHorizontal: 12,
+    paddingVertical: 0,
     textAlign: "center",
   },
+  setUtilityRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+    paddingLeft: 34,
+    width: "100%",
+  },
+  rpeControl: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 6,
+  },
+  utilityLabel: {
+    color: theme.mutedText,
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
   weightQuickActions: {
-    gap: 3,
-    width: 23,
+    flexDirection: "row",
+    gap: 6,
   },
   weightQuickButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
+    backgroundColor: "#111111",
+    borderColor: inputBorder,
     borderRadius: 6,
     borderWidth: 1,
-    flex: 1,
+    height: 36,
     justifyContent: "center",
-    minHeight: 19,
+    width: 36,
   },
   weightQuickText: {
-    color: theme.text,
+    color: accent,
     fontSize: 12,
     fontWeight: "900",
     lineHeight: 14,
   },
   plateMiniButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
+    backgroundColor: "#222222",
+    borderColor: inputBorder,
     borderRadius: 8,
     borderWidth: 1,
-    height: 42,
+    height: 36,
     justifyContent: "center",
-    width: 28,
+    paddingHorizontal: 12,
   },
   plateMiniButtonText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 11,
     fontWeight: "900",
   },
   previousBadge: {
     alignItems: "center",
-    backgroundColor: theme.background,
-    borderColor: theme.border,
+    backgroundColor: "#0A0A0A",
+    borderColor: border,
     borderRadius: 8,
     borderWidth: 1,
     flex: 1,
@@ -4023,8 +3999,9 @@ function createStyles(theme: ThemeTokens) {
   previousLine: {
     alignItems: "center",
     flexDirection: "row",
-    gap: 10,
-    paddingLeft: 34,
+    gap: 8,
+    paddingLeft: 32,
+    width: "100%",
   },
   previousLineLabel: {
     color: theme.mutedText,
@@ -4039,7 +4016,7 @@ function createStyles(theme: ThemeTokens) {
   },
   progressBadge: {
     alignItems: "center",
-    borderRadius: 8,
+    borderRadius: 999,
     borderWidth: 1,
     flexDirection: "row",
     gap: 4,
@@ -4049,16 +4026,16 @@ function createStyles(theme: ThemeTokens) {
     width: 118,
   },
   positiveProgressBadge: {
-    backgroundColor: theme.mode === "Dark" ? "rgba(34, 197, 94, 0.14)" : "rgba(22, 163, 74, 0.08)",
-    borderColor: theme.positive,
+    backgroundColor: "rgba(47, 123, 255, 0.14)",
+    borderColor: accent,
   },
   negativeProgressBadge: {
-    backgroundColor: theme.mode === "Dark" ? "rgba(248, 113, 113, 0.14)" : "rgba(220, 38, 38, 0.08)",
-    borderColor: theme.negative,
+    backgroundColor: "rgba(255, 90, 95, 0.12)",
+    borderColor: coral,
   },
   neutralProgressBadge: {
-    backgroundColor: theme.background,
-    borderColor: theme.border,
+    backgroundColor: "#0A0A0A",
+    borderColor: border,
   },
   progressSymbol: {
     fontSize: 12,
@@ -4070,65 +4047,69 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
   },
   positiveProgressText: {
-    color: theme.positive,
+    color: accent,
   },
   negativeProgressText: {
-    color: theme.negative,
+    color: coral,
   },
   neutralProgressText: {
     color: theme.neutral,
   },
   maxEffortBadge: {
     alignSelf: "flex-start",
-    backgroundColor: theme.mode === "Dark" ? "rgba(248, 250, 252, 0.12)" : "rgba(15, 23, 42, 0.06)",
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: "rgba(47, 123, 255, 0.12)",
+    borderColor: accent,
+    borderRadius: 999,
     borderWidth: 1,
     marginLeft: 34,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
   maxEffortText: {
-    color: theme.text,
+    color: accent,
     fontSize: 11,
     fontWeight: "900",
   },
   removeSetButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
+    backgroundColor: "#111111",
+    borderColor: inputBorder,
     borderRadius: 8,
     borderWidth: 1,
-    height: 42,
-    justifyContent: "center",
-    width: 32,
-  },
-  removeSetText: {
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: "900",
-    lineHeight: 16,
-  },
-  doneSetButton: {
-    alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
-    borderWidth: 1,
-    height: 42,
+    height: 44,
     justifyContent: "center",
     width: 38,
   },
+  removeSetText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
+    lineHeight: 18,
+  },
+  doneSetButton: {
+    alignItems: "center",
+    backgroundColor: "#111111",
+    borderColor: inputBorder,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    width: 70,
+  },
   doneSetButtonActive: {
-    backgroundColor: theme.text,
+    backgroundColor: doneGreen,
+    borderColor: doneGreen,
   },
   doneSetText: {
-    color: theme.text,
-    fontSize: 18,
+    color: "#FFFFFF",
+    fontSize: 11,
     fontWeight: "900",
+    letterSpacing: 0,
+    lineHeight: 12,
   },
   doneSetTextActive: {
-    color: theme.inverseText,
+    color: "#000000",
   },
   exerciseActions: {
     flexDirection: "row",
@@ -4137,36 +4118,36 @@ function createStyles(theme: ThemeTokens) {
   },
   secondaryButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 10,
     borderWidth: 1,
     flex: 1,
     paddingVertical: 12,
   },
   secondaryButtonText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 13,
     fontWeight: "900",
   },
   outlineButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 10,
     borderWidth: 1,
     flex: 1.25,
     paddingVertical: 12,
   },
   outlineButtonText: {
-    color: theme.text,
+    color: theme.strongText,
     fontSize: 13,
     fontWeight: "900",
   },
   weightHero: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 20,
     padding: 16,
@@ -4178,9 +4159,9 @@ function createStyles(theme: ThemeTokens) {
     marginTop: 10,
   },
   bodyweightLargeInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: inputBorder,
+    borderRadius: 12,
     borderWidth: 1,
     color: theme.text,
     flex: 1,
@@ -4191,9 +4172,9 @@ function createStyles(theme: ThemeTokens) {
   },
   weightUnitButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 12,
     borderWidth: 1,
     justifyContent: "center",
     minHeight: 62,
@@ -4201,13 +4182,13 @@ function createStyles(theme: ThemeTokens) {
     paddingHorizontal: 16,
   },
   weightUnitButtonText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 15,
     fontWeight: "900",
   },
   weightProgressBadge: {
     alignItems: "center",
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
     flexDirection: "row",
     gap: 12,
@@ -4237,9 +4218,9 @@ function createStyles(theme: ThemeTokens) {
   },
   weightHistoryRow: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     flexDirection: "row",
     justifyContent: "space-between",
@@ -4261,9 +4242,9 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
   },
   averagePanel: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 12,
     padding: 16,
@@ -4277,30 +4258,30 @@ function createStyles(theme: ThemeTokens) {
   metricGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
-    marginBottom: 14,
+    gap: 12,
+    marginBottom: 16,
   },
   metricCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     flexGrow: 1,
     minHeight: 96,
-    padding: 12,
+    padding: 14,
     width: "48%",
   },
   metricCardWide: {
     width: "100%",
   },
   metricValue: {
-    color: theme.text,
+    color: accent,
     fontSize: 25,
     fontWeight: "900",
     marginTop: 10,
   },
   metricInput: {
-    borderBottomColor: theme.border,
+    borderBottomColor: inputBorder,
     borderBottomWidth: 1,
     color: theme.text,
     fontSize: 24,
@@ -4372,16 +4353,16 @@ function createStyles(theme: ThemeTokens) {
     marginTop: 3,
   },
   progressTrack: {
-    backgroundColor: theme.subtle,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: "#0A0A0A",
+    borderColor: border,
+    borderRadius: 999,
     borderWidth: 1,
     height: 14,
     marginTop: 16,
     overflow: "hidden",
   },
   progressFill: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
     height: "100%",
   },
   calorieInputGrid: {
@@ -4410,9 +4391,9 @@ function createStyles(theme: ThemeTokens) {
     gap: 8,
   },
   calorieInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: inputBorder,
+    borderRadius: 10,
     borderWidth: 1,
     color: theme.text,
     flex: 1,
@@ -4423,15 +4404,15 @@ function createStyles(theme: ThemeTokens) {
   },
   calorieActionButton: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 10,
     borderWidth: 1,
     justifyContent: "center",
     minWidth: 86,
   },
   calorieActionButtonText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 13,
     fontWeight: "900",
   },
@@ -4459,9 +4440,9 @@ function createStyles(theme: ThemeTokens) {
     marginTop: 4,
   },
   macroCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 12,
     padding: 14,
@@ -4487,9 +4468,9 @@ function createStyles(theme: ThemeTokens) {
     marginTop: 12,
   },
   macroInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: inputBorder,
+    borderRadius: 10,
     borderWidth: 1,
     color: theme.text,
     flex: 1,
@@ -4539,9 +4520,9 @@ function createStyles(theme: ThemeTokens) {
   },
   historyRow: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     flexDirection: "row",
     gap: 10,
@@ -4549,8 +4530,8 @@ function createStyles(theme: ThemeTokens) {
     padding: 12,
   },
   historyTypeDot: {
-    backgroundColor: theme.text,
-    borderColor: theme.border,
+    backgroundColor: accent,
+    borderColor: accent,
     borderRadius: 5,
     borderWidth: 1,
     height: 10,
@@ -4573,38 +4554,39 @@ function createStyles(theme: ThemeTokens) {
     marginTop: 2,
   },
   deleteLogButton: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 10,
     borderWidth: 1,
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
   deleteLogText: {
-    color: theme.text,
+    color: coral,
     fontSize: 12,
     fontWeight: "900",
   },
   calendarGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8,
+    gap: 7,
   },
   calendarCell: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.subtle,
-    borderRadius: 5,
+    backgroundColor: "#0B0B0B",
+    borderColor: "#161616",
+    borderRadius: 6,
     borderWidth: 1,
-    height: 38,
+    height: 36,
     justifyContent: "center",
     width: "12%",
   },
   calendarCellCompleted: {
-    backgroundColor: theme.text,
-    borderColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   calendarCellToday: {
+    borderColor: "#FFFFFF",
     borderWidth: 2,
   },
   calendarCellText: {
@@ -4613,7 +4595,7 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "800",
   },
   calendarCellTextCompleted: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   prRow: {
     alignItems: "center",
@@ -4645,28 +4627,28 @@ function createStyles(theme: ThemeTokens) {
   },
   analyticsGrid: {
     flexDirection: "row",
-    gap: 10,
-    marginBottom: 14,
+    gap: 12,
+    marginBottom: 16,
   },
   analyticsCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     flex: 1,
     minHeight: 136,
     padding: 14,
   },
   analyticsNumber: {
-    color: theme.text,
+    color: accent,
     fontSize: 38,
     fontWeight: "900",
     marginTop: 8,
   },
   chartCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 14,
     padding: 14,
@@ -4689,8 +4671,8 @@ function createStyles(theme: ThemeTokens) {
     marginBottom: 6,
   },
   volumeBar: {
-    backgroundColor: theme.text,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderRadius: 999,
     width: "100%",
   },
   volumeLabel: {
@@ -4788,9 +4770,9 @@ function createStyles(theme: ThemeTokens) {
     padding: 14,
   },
   settingsCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginBottom: 14,
     padding: 14,
@@ -4811,9 +4793,9 @@ function createStyles(theme: ThemeTokens) {
   },
   segmentOption: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 999,
     borderWidth: 1,
     flex: 1,
     justifyContent: "center",
@@ -4821,7 +4803,8 @@ function createStyles(theme: ThemeTokens) {
     paddingHorizontal: 10,
   },
   segmentOptionActive: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   segmentOptionText: {
     color: theme.text,
@@ -4830,7 +4813,7 @@ function createStyles(theme: ThemeTokens) {
     textAlign: "center",
   },
   segmentOptionTextActive: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   timerToggleRow: {
     alignItems: "center",
@@ -4844,8 +4827,8 @@ function createStyles(theme: ThemeTokens) {
   },
   toggleSwitch: {
     alignItems: "flex-start",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
+    backgroundColor: surface,
+    borderColor: inputBorder,
     borderRadius: 18,
     borderWidth: 1,
     padding: 3,
@@ -4853,20 +4836,21 @@ function createStyles(theme: ThemeTokens) {
   },
   toggleSwitchOn: {
     alignItems: "flex-end",
-    backgroundColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   toggleKnob: {
-    backgroundColor: theme.text,
+    backgroundColor: theme.strongText,
     borderRadius: 13,
     height: 26,
     width: 26,
   },
   toggleKnobOn: {
-    backgroundColor: theme.surface,
+    backgroundColor: "#000000",
   },
   timerDurationPanel: {
-    borderColor: theme.border,
-    borderRadius: 8,
+    borderColor: border,
+    borderRadius: 12,
     borderWidth: 1,
     marginTop: 14,
     padding: 14,
@@ -4879,16 +4863,17 @@ function createStyles(theme: ThemeTokens) {
   },
   timerPresetButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 999,
     borderWidth: 1,
     minWidth: 58,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
   timerPresetButtonActive: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   timerPresetText: {
     color: theme.text,
@@ -4896,7 +4881,7 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
   },
   timerPresetTextActive: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   timerDurationControls: {
     flexDirection: "row",
@@ -4910,9 +4895,9 @@ function createStyles(theme: ThemeTokens) {
   },
   durationButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 10,
     borderWidth: 1,
     justifyContent: "center",
     minWidth: 72,
@@ -4925,23 +4910,23 @@ function createStyles(theme: ThemeTokens) {
   },
   durationDisplay: {
     alignItems: "center",
-    backgroundColor: theme.text,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 10,
     borderWidth: 1,
     flex: 1,
     justifyContent: "center",
     minHeight: 46,
   },
   durationDisplayText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "900",
   },
   durationInput: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: inputBorder,
+    borderRadius: 10,
     borderWidth: 1,
     color: theme.text,
     flex: 1,
@@ -4981,20 +4966,20 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "800",
   },
   bottomTabBar: {
-    backgroundColor: theme.surface,
-    borderTopColor: theme.border,
+    backgroundColor: "#050505",
+    borderTopColor: border,
     borderTopWidth: 1,
     flexDirection: "row",
-    gap: 5,
-    paddingHorizontal: 8,
-    paddingTop: 10,
+    gap: 7,
+    paddingHorizontal: 10,
+    paddingTop: 12,
     paddingBottom: BOTTOM_TAB_BOTTOM_PADDING,
   },
   bottomTabButton: {
     alignItems: "center",
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: 8,
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 999,
     borderWidth: 1,
     flex: 1,
     justifyContent: "center",
@@ -5005,7 +4990,7 @@ function createStyles(theme: ThemeTokens) {
     position: "relative",
   },
   bottomTabActiveFill: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
     bottom: 0,
     left: 0,
     position: "absolute",
@@ -5022,7 +5007,8 @@ function createStyles(theme: ThemeTokens) {
     position: "absolute",
   },
   activeBottomTabButton: {
-    backgroundColor: theme.text,
+    backgroundColor: accent,
+    borderColor: accent,
   },
   bottomTabText: {
     color: theme.text,
@@ -5031,7 +5017,7 @@ function createStyles(theme: ThemeTokens) {
     textAlign: "center",
   },
   activeBottomTabText: {
-    color: theme.inverseText,
+    color: "#FFFFFF",
   },
   });
 }
