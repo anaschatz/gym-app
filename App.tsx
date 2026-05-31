@@ -143,6 +143,12 @@ type WeightProgressStatus = {
   label: string;
   tone: "positive" | "negative" | "neutral";
 };
+type GamificationStats = {
+  streakCount: number;
+  lastWorkoutDate: string | null;
+  totalXP: number;
+  workoutBonusClaims: Record<string, string>;
+};
 type CompletedSetsById = Record<string, string>;
 type CompletedDates = string[];
 type DailyCalorieTargets = Record<string, string>;
@@ -172,6 +178,7 @@ const APP_SETTINGS_STORAGE_KEY = "@iphone_gym_tracker/app_settings_v1";
 const COMPLETED_SETS_STORAGE_KEY = "@iphone_gym_tracker/completed_sets_v1";
 const COMPLETED_DATES_STORAGE_KEY = "@iphone_gym_tracker/completed_dates_v1";
 const DAILY_CALORIE_TARGETS_STORAGE_KEY = "@iphone_gym_tracker/daily_calorie_targets_v1";
+const GAMIFICATION_STORAGE_KEY = "@iphone_gym_tracker/gamification_v1";
 const DAY_NAMES: WorkoutDayName[] = ["Push", "Pull", "Legs"];
 const APP_TABS: AppTab[] = ["Workouts", "Nutrition", "Weight", "Stats", "Settings"];
 const REST_SECONDS = 90;
@@ -194,6 +201,11 @@ const SCREEN_BOTTOM_PADDING = Platform.OS === "ios" ? 44 : 28;
 const BOTTOM_TAB_BOTTOM_PADDING = Platform.OS === "ios" ? 26 : 10;
 const BAR_WEIGHT_KG = 20;
 const PLATE_OPTIONS_KG = [20, 10, 5];
+const STREAK_WINDOW_DAYS = 7;
+const XP_PER_COMPLETED_SET = 10;
+const XP_PER_COMPLETED_WORKOUT_DAY = 50;
+const XP_PER_LEVEL = 500;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_MACRO_TARGETS: MacroDrafts = {
   protein: "180",
   carbs: "250",
@@ -203,6 +215,12 @@ const EMPTY_MACROS: MacroValues = {
   protein: 0,
   carbs: 0,
   fats: 0,
+};
+const DEFAULT_GAMIFICATION_STATS: GamificationStats = {
+  streakCount: 0,
+  lastWorkoutDate: null,
+  totalXP: 0,
+  workoutBonusClaims: {},
 };
 const MACRO_LABELS: Record<MacroName, string> = {
   protein: "Protein",
@@ -502,6 +520,21 @@ const dateKeyFromIso = (isoDate: string) => {
   return formatDateKey(date);
 };
 
+const dateKeyToTime = (dateKey: string) => {
+  const date = new Date(`${dateKey}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+};
+
+const getDateKeyDistance = (fromDateKey: string, toDateKey: string) => {
+  const fromTime = dateKeyToTime(fromDateKey);
+  const toTime = dateKeyToTime(toDateKey);
+  if (fromTime === null || toTime === null) {
+    return null;
+  }
+
+  return Math.floor((toTime - fromTime) / MS_PER_DAY);
+};
+
 const toKilograms = (value: number, unit: WeightUnit) => (unit === "kg" ? value : value * 0.45359237);
 
 const convertWeight = (value: number, fromUnit: WeightUnit, toUnit: WeightUnit) => {
@@ -574,6 +607,15 @@ const calculateExerciseVolume = (exercise: ExerciseEntry) =>
 
 const calculateWorkoutDayVolume = (day: Pick<WorkoutDayEntry, "exercises"> | Pick<ExtraWorkoutDayEntry, "exercises">) =>
   day.exercises.reduce((dayTotal, exercise) => dayTotal + calculateExerciseVolume(exercise), 0);
+
+const isWorkoutDayFullyCompleted = (
+  day: Pick<WorkoutDayEntry, "exercises"> | Pick<ExtraWorkoutDayEntry, "exercises">,
+  completedSets: CompletedSetsById,
+) =>
+  day.exercises.length > 0 &&
+  day.exercises.every(
+    (exercise) => exercise.sets.length > 0 && exercise.sets.every((set) => Boolean(completedSets[set.id])),
+  );
 
 const calculateWeekVolume = (week: WeekEntry, extraDays: ExtraWorkoutDayEntry[] = []) =>
   DAY_NAMES.reduce(
@@ -861,6 +903,42 @@ const normalizeDailyCalorieTargets = (value: unknown): DailyCalorieTargets => {
   }, {} as DailyCalorieTargets);
 };
 
+const normalizeWorkoutBonusClaims = (value: unknown): Record<string, string> => {
+  const record = asRecord(value);
+  if (!record) {
+    return {};
+  }
+
+  return Object.entries(record).reduce((claims, [claimKey, dateKey]) => {
+    if (typeof claimKey === "string" && typeof dateKey === "string" && isValidDateKey(dateKey)) {
+      claims[claimKey] = dateKey;
+    }
+
+    return claims;
+  }, {} as Record<string, string>);
+};
+
+const normalizeGamificationStats = (value: unknown): GamificationStats => {
+  const record = asRecord(value);
+  if (!record) {
+    return DEFAULT_GAMIFICATION_STATS;
+  }
+
+  const rawStreak = typeof record.streakCount === "number" ? record.streakCount : 0;
+  const rawTotalXP = typeof record.totalXP === "number" ? record.totalXP : 0;
+  const lastWorkoutDate =
+    typeof record.lastWorkoutDate === "string" && isValidDateKey(record.lastWorkoutDate)
+      ? record.lastWorkoutDate
+      : null;
+
+  return {
+    streakCount: Math.max(0, Math.floor(rawStreak)),
+    lastWorkoutDate,
+    totalXP: Math.max(0, Math.floor(rawTotalXP)),
+    workoutBonusClaims: normalizeWorkoutBonusClaims(record.workoutBonusClaims),
+  };
+};
+
 const getPreviousDateKey = (dateKey: string) => {
   const date = new Date(`${dateKey}T00:00:00`);
   if (Number.isNaN(date.getTime())) {
@@ -912,6 +990,37 @@ const completedDatesFromCompletedSets = (completedSets: CompletedSetsById): Comp
         .filter((dateKey): dateKey is string => Boolean(dateKey)),
     ),
   );
+
+const awardGamificationForCompletedSet = (
+  stats: GamificationStats,
+  workoutDateKey: string,
+  workoutBonusClaimKey: string | null,
+): GamificationStats => {
+  const daysSinceLastWorkout = stats.lastWorkoutDate
+    ? getDateKeyDistance(stats.lastWorkoutDate, workoutDateKey)
+    : null;
+  const nextStreakCount =
+    !stats.lastWorkoutDate
+      ? 1
+      : daysSinceLastWorkout === 0
+        ? Math.max(1, stats.streakCount)
+        : daysSinceLastWorkout !== null && daysSinceLastWorkout > 0 && daysSinceLastWorkout <= STREAK_WINDOW_DAYS
+          ? Math.max(1, stats.streakCount + 1)
+          : Math.max(1, daysSinceLastWorkout !== null && daysSinceLastWorkout < 0 ? stats.streakCount : 1);
+  const canClaimWorkoutBonus = Boolean(workoutBonusClaimKey && !stats.workoutBonusClaims[workoutBonusClaimKey]);
+  const nextWorkoutBonusClaims =
+    workoutBonusClaimKey && canClaimWorkoutBonus
+      ? { ...stats.workoutBonusClaims, [workoutBonusClaimKey]: workoutDateKey }
+      : stats.workoutBonusClaims;
+
+  return {
+    ...stats,
+    streakCount: nextStreakCount,
+    lastWorkoutDate: workoutDateKey,
+    totalXP: stats.totalXP + XP_PER_COMPLETED_SET + (canClaimWorkoutBonus ? XP_PER_COMPLETED_WORKOUT_DAY : 0),
+    workoutBonusClaims: nextWorkoutBonusClaims,
+  };
+};
 
 const normalizeWeeks = (value: unknown): WeekEntry[] | null => {
   if (!Array.isArray(value) || value.length === 0) {
@@ -1166,6 +1275,7 @@ export default function App() {
   const [macroTargetMode, setMacroTargetMode] = useState<MacroTargetMode>(DEFAULT_APP_SETTINGS.macroTargetMode);
   const [customMacroTargets, setCustomMacroTargets] = useState<MacroDrafts>(DEFAULT_APP_SETTINGS.customMacroTargets);
   const [nutritionResetNotice, setNutritionResetNotice] = useState<string | null>(null);
+  const [gamificationStats, setGamificationStats] = useState<GamificationStats>(DEFAULT_GAMIFICATION_STATS);
   const [showWorkoutScrollTop, setShowWorkoutScrollTop] = useState(false);
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -1194,6 +1304,12 @@ export default function App() {
   const currentWorkoutDayLabel = activeExtraWorkoutDay?.label ?? activeWorkoutBaseDay;
   const theme = APP_THEME;
   const styles = useMemo(() => createStyles(APP_THEME), []);
+  const gymLevel = useMemo(
+    () => Math.floor(gamificationStats.totalXP / XP_PER_LEVEL) + 1,
+    [gamificationStats.totalXP],
+  );
+  const currentLevelXP = useMemo(() => gamificationStats.totalXP % XP_PER_LEVEL, [gamificationStats.totalXP]);
+  const levelProgress = useMemo(() => currentLevelXP / XP_PER_LEVEL, [currentLevelXP]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1232,6 +1348,11 @@ export default function App() {
         const savedDailyCalorieTargets = await AsyncStorage.getItem(DAILY_CALORIE_TARGETS_STORAGE_KEY);
         if (savedDailyCalorieTargets && isMounted) {
           setDailyCalorieTargets(normalizeDailyCalorieTargets(JSON.parse(savedDailyCalorieTargets)));
+        }
+
+        const savedGamification = await AsyncStorage.getItem(GAMIFICATION_STORAGE_KEY);
+        if (savedGamification && isMounted) {
+          setGamificationStats(normalizeGamificationStats(JSON.parse(savedGamification)));
         }
 
         const savedAppSettings = await AsyncStorage.getItem(APP_SETTINGS_STORAGE_KEY);
@@ -1318,6 +1439,38 @@ export default function App() {
       setStorageError("Daily calorie targets could not be saved to this device.");
     });
   }, [dailyCalorieTargets, hasLoadedStorage]);
+
+  useEffect(() => {
+    if (!hasLoadedStorage) {
+      return;
+    }
+
+    AsyncStorage.setItem(GAMIFICATION_STORAGE_KEY, JSON.stringify(gamificationStats)).catch(() => {
+      setStorageError("Gamification progress could not be saved to this device.");
+    });
+  }, [gamificationStats, hasLoadedStorage]);
+
+  useEffect(() => {
+    if (!hasLoadedStorage) {
+      return;
+    }
+
+    setGamificationStats((stats) => {
+      if (!stats.lastWorkoutDate || stats.streakCount === 0) {
+        return stats;
+      }
+
+      const daysSinceLastWorkout = getDateKeyDistance(stats.lastWorkoutDate, todayDateKey);
+      if (daysSinceLastWorkout !== null && daysSinceLastWorkout > STREAK_WINDOW_DAYS) {
+        return {
+          ...stats,
+          streakCount: 0,
+        };
+      }
+
+      return stats;
+    });
+  }, [hasLoadedStorage, todayDateKey]);
 
   useEffect(() => {
     if (!hasLoadedStorage) {
@@ -2139,6 +2292,21 @@ export default function App() {
 
   const toggleSetComplete = useCallback((setId: string) => {
     const shouldStartTimer = !completedSets[setId];
+    const completedAt = new Date();
+    const completedAtIso = completedAt.toISOString();
+    const completedAtDateKey = formatDateKey(completedAt);
+    const nextCompletedSets = shouldStartTimer
+      ? {
+          ...completedSets,
+          [setId]: completedAtIso,
+        }
+      : completedSets;
+    const workoutBonusClaimKey = `${currentWeek.id}:${activeWorkoutDayId}`;
+    const shouldClaimWorkoutBonus =
+      shouldStartTimer &&
+      !isWorkoutDayFullyCompleted(currentWorkoutDay, completedSets) &&
+      isWorkoutDayFullyCompleted(currentWorkoutDay, nextCompletedSets);
+
     if (shouldStartTimer && timerSettings.enabled) {
       shouldVibrateWhenTimerEndsRef.current = true;
       warnedAtThreeSecondsRef.current = false;
@@ -2147,6 +2315,13 @@ export default function App() {
 
     if (shouldStartTimer) {
       addCompletedDateForToday();
+      setGamificationStats((stats) =>
+        awardGamificationForCompletedSet(
+          stats,
+          completedAtDateKey,
+          shouldClaimWorkoutBonus ? workoutBonusClaimKey : null,
+        ),
+      );
     }
 
     setCompletedSets((previousCompletedSets) => {
@@ -2158,10 +2333,18 @@ export default function App() {
 
       return {
         ...previousCompletedSets,
-        [setId]: new Date().toISOString(),
+        [setId]: completedAtIso,
       };
     });
-  }, [addCompletedDateForToday, completedSets, timerSettings.duration, timerSettings.enabled]);
+  }, [
+    activeWorkoutDayId,
+    addCompletedDateForToday,
+    completedSets,
+    currentWeek.id,
+    currentWorkoutDay,
+    timerSettings.duration,
+    timerSettings.enabled,
+  ]);
 
   const openPlateCalculator = useCallback((exerciseName: string, weight: string) => {
     const parsedWeight = safeNumber(weight);
@@ -2498,16 +2681,41 @@ export default function App() {
 
   const exerciseKeyExtractor = useCallback((exercise: ExerciseEntry) => exercise.id, []);
 
+  const renderGamificationCard = useCallback(
+    () => (
+      <View style={styles.gamificationCard}>
+        <View style={styles.streakHeaderRow}>
+          <View style={styles.streakTitleBlock}>
+            <Text style={styles.streakIcon}>🔥</Text>
+            <Text style={styles.streakTitle}>{gamificationStats.streakCount} Week Streak</Text>
+          </View>
+          <View style={styles.levelPill}>
+            <Text style={styles.levelPillText}>Level {gymLevel}</Text>
+          </View>
+        </View>
+        <View style={styles.xpMetaRow}>
+          <Text style={styles.xpMetaText}>{gamificationStats.totalXP} Total XP</Text>
+          <Text style={styles.xpMetaText}>{currentLevelXP}/{XP_PER_LEVEL} XP</Text>
+        </View>
+        <View style={styles.levelProgressTrack}>
+          <View style={[styles.levelProgressFill, { width: `${levelProgress * 100}%` }]} />
+        </View>
+      </View>
+    ),
+    [currentLevelXP, gamificationStats.streakCount, gamificationStats.totalXP, gymLevel, levelProgress, styles],
+  );
+
   const renderWorkoutHeader = useCallback(
     () => (
       <>
         <View style={styles.heroHeader}>
           <View>
-            <Text style={styles.screenTitle}>Workouts</Text>
-            <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - {currentWorkoutDayLabel}</Text>
+            <Text style={styles.screenTitle}>{currentWorkoutDayLabel}</Text>
+            <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - Workouts</Text>
           </View>
         </View>
 
+        {renderGamificationCard()}
         {renderStorageWarning()}
         {renderRestTimer()}
         {renderWeekSelector()}
@@ -2515,7 +2723,7 @@ export default function App() {
 
         <View style={styles.sectionHeader}>
           <View>
-            <Text style={styles.sectionTitle}>{currentWorkoutDayLabel}</Text>
+            <Text style={styles.sectionTitle}>Exercises</Text>
             <Text style={styles.sectionSubtitle}>
               {timerSettings.enabled ? "Tap weight for plates. Check a set to start rest." : "Tap weight for plates. Rest timer is hidden."}
             </Text>
@@ -2544,6 +2752,7 @@ export default function App() {
       currentWorkoutDayLabel,
       newExerciseName,
       renderRestTimer,
+      renderGamificationCard,
       renderStorageWarning,
       renderWeekSelector,
       renderWorkoutDayTabs,
@@ -3648,6 +3857,73 @@ function createStyles(theme: ThemeTokens) {
     color: theme.text,
     fontSize: 13,
     fontWeight: "800",
+  },
+  gamificationCard: {
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 14,
+  },
+  streakHeaderRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  streakTitleBlock: {
+    alignItems: "center",
+    flex: 1,
+    flexDirection: "row",
+    gap: 8,
+  },
+  streakIcon: {
+    color: accent,
+    fontSize: 22,
+    lineHeight: 24,
+  },
+  streakTitle: {
+    color: accent,
+    flex: 1,
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  levelPill: {
+    backgroundColor: "rgba(47, 123, 255, 0.14)",
+    borderColor: accent,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  levelPillText: {
+    color: theme.strongText,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  xpMetaRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 12,
+  },
+  xpMetaText: {
+    color: theme.mutedText,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  levelProgressTrack: {
+    backgroundColor: "#0A0A0A",
+    borderColor: inputBorder,
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 10,
+    marginTop: 9,
+    overflow: "hidden",
+  },
+  levelProgressFill: {
+    backgroundColor: accent,
+    height: "100%",
   },
   baseDayTabsRow: {
     flexDirection: "row",
