@@ -1166,6 +1166,7 @@ export default function App() {
   const [macroTargetMode, setMacroTargetMode] = useState<MacroTargetMode>(DEFAULT_APP_SETTINGS.macroTargetMode);
   const [customMacroTargets, setCustomMacroTargets] = useState<MacroDrafts>(DEFAULT_APP_SETTINGS.customMacroTargets);
   const [nutritionResetNotice, setNutritionResetNotice] = useState<string | null>(null);
+  const [showWorkoutScrollTop, setShowWorkoutScrollTop] = useState(false);
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
   const shouldVibrateWhenTimerEndsRef = useRef(false);
@@ -1173,6 +1174,7 @@ export default function App() {
   const exerciseSwipeStartRef = useRef<{ exerciseId: string; x: number; y: number } | null>(null);
   const appliedDailyCalorieTargetRef = useRef<string | null>(null);
   const tabPagerRef = useRef<ScrollView>(null);
+  const workoutListRef = useRef<FlatList<ExerciseEntry>>(null);
   const { width: windowWidth } = useWindowDimensions();
   const pageWidth = Math.max(1, windowWidth);
   const todayDateKey = useMemo(() => formatDateKey(new Date()), []);
@@ -1516,6 +1518,16 @@ export default function App() {
     },
     [pageWidth],
   );
+
+  const handleWorkoutScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const shouldShow = event.nativeEvent.contentOffset.y > 360;
+    setShowWorkoutScrollTop((isVisible) => (isVisible === shouldShow ? isVisible : shouldShow));
+  }, []);
+
+  const scrollWorkoutToTop = useCallback(() => {
+    workoutListRef.current?.scrollToOffset({ animated: false, offset: 0 });
+    setShowWorkoutScrollTop(false);
+  }, []);
 
   const updateExercise = useCallback(
     (exerciseId: string, updater: (exercise: ExerciseEntry) => ExerciseEntry) => {
@@ -2293,7 +2305,7 @@ export default function App() {
   );
 
   const renderDayTabs = () => (
-    <ScrollView horizontal bounces={false} contentContainerStyle={styles.dayTabsContent} showsHorizontalScrollIndicator={false}>
+    <View style={styles.baseDayTabsRow}>
       {DAY_NAMES.map((dayName) => {
         const isActive = activeDay === dayName;
         return (
@@ -2307,12 +2319,12 @@ export default function App() {
           </TouchableOpacity>
         );
       })}
-    </ScrollView>
+    </View>
   );
 
   const renderWorkoutDayTabs = () => (
     <View style={styles.workoutTabsBlock}>
-      <ScrollView horizontal bounces={false} contentContainerStyle={styles.dayTabsContent} showsHorizontalScrollIndicator={false}>
+      <View style={styles.baseDayTabsRow}>
         {DAY_NAMES.map((dayName) => {
           const isActive = activeWorkoutDayId === dayName;
           return (
@@ -2326,20 +2338,24 @@ export default function App() {
             </TouchableOpacity>
           );
         })}
-        {currentExtraWorkoutDays.map((day) => {
-          const isActive = activeWorkoutDayId === day.id;
-          return (
-            <TouchableOpacity
-              activeOpacity={0.8}
-              key={day.id}
-              onPress={() => selectWorkoutDay(day.id)}
-              style={[styles.dayTab, styles.extraDayTab, isActive && styles.activeDayTab]}
-            >
-              <Text style={[styles.dayTabText, isActive && styles.activeDayTabText]}>{day.label}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
+      </View>
+      {currentExtraWorkoutDays.length > 0 ? (
+        <ScrollView horizontal bounces={false} contentContainerStyle={styles.extraDayTabsContent} showsHorizontalScrollIndicator={false}>
+          {currentExtraWorkoutDays.map((day) => {
+            const isActive = activeWorkoutDayId === day.id;
+            return (
+              <TouchableOpacity
+                activeOpacity={0.8}
+                key={day.id}
+                onPress={() => selectWorkoutDay(day.id)}
+                style={[styles.dayTab, styles.extraDayTab, isActive && styles.activeDayTab]}
+              >
+                <Text style={[styles.dayTabText, isActive && styles.activeDayTabText]}>{day.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      ) : null}
       <TouchableOpacity activeOpacity={0.8} onPress={() => setIsAddDayModalVisible(true)} style={styles.addDayButton}>
         <Text style={styles.addDayButtonText}>+ Add Day</Text>
       </TouchableOpacity>
@@ -2693,24 +2709,42 @@ export default function App() {
   );
 
   const renderWorkoutTab = () => (
-    <FlatList<ExerciseEntry>
-      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
-      bounces
-      contentContainerStyle={styles.screenContent}
-      data={currentWorkoutDay.exercises}
-      initialNumToRender={4}
-      keyboardDismissMode={KEYBOARD_DISMISS_MODE}
-      keyboardShouldPersistTaps="handled"
-      keyExtractor={exerciseKeyExtractor}
-      ListEmptyComponent={renderWorkoutEmpty}
-      ListHeaderComponent={renderWorkoutHeader}
-      maxToRenderPerBatch={4}
-      removeClippedSubviews={Platform.OS === "android"}
-      renderItem={renderExerciseItem}
-      showsVerticalScrollIndicator={false}
-      updateCellsBatchingPeriod={32}
-      windowSize={5}
-    />
+    <View style={styles.workoutTabShell}>
+      <FlatList<ExerciseEntry>
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+        bounces
+        contentContainerStyle={styles.screenContent}
+        data={currentWorkoutDay.exercises}
+        initialNumToRender={4}
+        keyboardDismissMode={KEYBOARD_DISMISS_MODE}
+        keyboardShouldPersistTaps="handled"
+        keyExtractor={exerciseKeyExtractor}
+        ListEmptyComponent={renderWorkoutEmpty}
+        ListHeaderComponent={renderWorkoutHeader}
+        maxToRenderPerBatch={4}
+        onScroll={handleWorkoutScroll}
+        ref={workoutListRef}
+        removeClippedSubviews={Platform.OS === "android"}
+        renderItem={renderExerciseItem}
+        scrollEventThrottle={16}
+        showsVerticalScrollIndicator={false}
+        updateCellsBatchingPeriod={32}
+        windowSize={5}
+      />
+      {showWorkoutScrollTop ? (
+        <TouchableOpacity
+          accessibilityLabel="Scroll workouts to top"
+          activeOpacity={0.86}
+          delayPressIn={0}
+          hitSlop={{ bottom: 12, left: 12, right: 12, top: 12 }}
+          onPress={scrollWorkoutToTop}
+          onPressIn={scrollWorkoutToTop}
+          style={styles.scrollTopButton}
+        >
+          <Text style={styles.scrollTopButtonText}>↑</Text>
+        </TouchableOpacity>
+      ) : null}
+    </View>
   );
 
   const nutritionLogKeyExtractor = useCallback((log: CalorieLog) => log.id, []);
@@ -3615,12 +3649,22 @@ function createStyles(theme: ThemeTokens) {
     fontSize: 13,
     fontWeight: "800",
   },
-  dayTabsContent: {
+  baseDayTabsRow: {
+    flexDirection: "row",
     gap: 10,
+    justifyContent: "space-between",
     paddingBottom: 18,
+    width: "100%",
+  },
+  extraDayTabsContent: {
+    gap: 10,
+    paddingBottom: 12,
   },
   workoutTabsBlock: {
     marginBottom: 2,
+  },
+  workoutTabShell: {
+    flex: 1,
   },
   dayTab: {
     alignItems: "center",
@@ -3628,7 +3672,8 @@ function createStyles(theme: ThemeTokens) {
     borderColor: border,
     borderRadius: 999,
     borderWidth: 1,
-    minWidth: 104,
+    flex: 1,
+    minWidth: 0,
     paddingHorizontal: 18,
     paddingVertical: 11,
   },
@@ -3637,6 +3682,7 @@ function createStyles(theme: ThemeTokens) {
     borderColor: accent,
   },
   extraDayTab: {
+    flex: 0,
     minWidth: 128,
   },
   dayTabText: {
@@ -3646,6 +3692,31 @@ function createStyles(theme: ThemeTokens) {
   },
   activeDayTabText: {
     color: "#FFFFFF",
+  },
+  scrollTopButton: {
+    alignItems: "center",
+    backgroundColor: accent,
+    borderColor: accent,
+    borderRadius: 24,
+    borderWidth: 1,
+    bottom: 18,
+    elevation: 20,
+    height: 48,
+    justifyContent: "center",
+    position: "absolute",
+    right: 18,
+    shadowColor: "#000000",
+    shadowOffset: { height: 8, width: 0 },
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    width: 48,
+    zIndex: 20,
+  },
+  scrollTopButtonText: {
+    color: "#FFFFFF",
+    fontSize: 24,
+    fontWeight: "900",
+    lineHeight: 26,
   },
   addDayButton: {
     alignItems: "center",
