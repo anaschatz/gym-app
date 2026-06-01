@@ -1635,11 +1635,18 @@ export default function App() {
       const nextIndex = Math.min(APP_TABS.length - 1, Math.max(0, Math.round(offsetX / pageWidth)));
       const nextTab = APP_TABS[nextIndex];
 
-      if (nextTab && nextTab !== activeTab) {
-        setActiveTab(nextTab);
+      if (nextTab) {
+        setActiveTab((currentTab) => (currentTab === nextTab ? currentTab : nextTab));
       }
     },
-    [activeTab, pageWidth],
+    [pageWidth],
+  );
+
+  const handleTabScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      syncActiveTabFromOffset(event.nativeEvent.contentOffset.x);
+    },
+    [syncActiveTabFromOffset],
   );
 
   const handleTabMomentumEnd = useCallback(
@@ -3587,11 +3594,12 @@ export default function App() {
                 keyboardShouldPersistTaps="handled"
                 nestedScrollEnabled
                 onMomentumScrollEnd={handleTabMomentumEnd}
+                onScroll={handleTabScroll}
                 onScrollEndDrag={handleTabScrollEndDrag}
                 overScrollMode="never"
                 pagingEnabled
                 ref={tabPagerRef}
-                scrollEventThrottle={8}
+                scrollEventThrottle={16}
                 showsHorizontalScrollIndicator={false}
               >
                 {APP_TABS.map((tab) => (
