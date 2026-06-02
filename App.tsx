@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Alert,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   type ListRenderItemInfo,
   Modal,
@@ -185,8 +186,6 @@ const REST_SECONDS = 90;
 const MIN_REST_SECONDS = 1;
 const QUICK_WEIGHT_TAP_STEP_KG = 2.5;
 const QUICK_WEIGHT_LONG_PRESS_STEP_KG = 1.25;
-const EXERCISE_SWIPE_THRESHOLD = 58;
-const EXERCISE_SWIPE_VERTICAL_TOLERANCE = 44;
 const REST_TIMER_PRESETS = [
   { label: "30s", seconds: 30 },
   { label: "60s", seconds: 60 },
@@ -1066,7 +1065,7 @@ function BottomTabButton({ activeTab, onPress, styles, tab }: BottomTabButtonPro
     <TouchableOpacity
       accessibilityRole="tab"
       accessibilityState={{ selected: isActive }}
-      activeOpacity={0.85}
+      activeOpacity={1}
       onPress={() => onPress(tab)}
       style={[styles.bottomTabButton, isActive && styles.activeBottomTabButton]}
     >
@@ -1260,7 +1259,6 @@ export default function App() {
   const [completedSets, setCompletedSets] = useState<CompletedSetsById>({});
   const [completedDates, setCompletedDates] = useState<CompletedDates>([]);
   const [dailyCalorieTargets, setDailyCalorieTargets] = useState<DailyCalorieTargets>({});
-  const [swipedExerciseId, setSwipedExerciseId] = useState<string | null>(null);
   const [restSeconds, setRestSeconds] = useState(0);
   const [plateModal, setPlateModal] = useState<PlateModalState>(null);
   const [extraWorkoutDays, setExtraWorkoutDays] = useState<ExtraWorkoutDaysByWeek>({});
@@ -1277,13 +1275,15 @@ export default function App() {
   const [nutritionResetNotice, setNutritionResetNotice] = useState<string | null>(null);
   const [gamificationStats, setGamificationStats] = useState<GamificationStats>(DEFAULT_GAMIFICATION_STATS);
   const [showWorkoutScrollTop, setShowWorkoutScrollTop] = useState(false);
+  const [showExerciseRecommendations, setShowExerciseRecommendations] = useState(false);
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
   const shouldVibrateWhenTimerEndsRef = useRef(false);
   const warnedAtThreeSecondsRef = useRef(false);
-  const exerciseSwipeStartRef = useRef<{ exerciseId: string; x: number; y: number } | null>(null);
   const appliedDailyCalorieTargetRef = useRef<string | null>(null);
   const tabPagerRef = useRef<ScrollView>(null);
+  const isProgrammaticTabScrollRef = useRef(false);
+  const programmaticTabScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const workoutListRef = useRef<FlatList<ExerciseEntry>>(null);
   const { width: windowWidth } = useWindowDimensions();
   const pageWidth = Math.max(1, windowWidth);
@@ -1310,6 +1310,30 @@ export default function App() {
   );
   const currentLevelXP = useMemo(() => gamificationStats.totalXP % XP_PER_LEVEL, [gamificationStats.totalXP]);
   const levelProgress = useMemo(() => currentLevelXP / XP_PER_LEVEL, [currentLevelXP]);
+  const recommendedExercises = useMemo(() => {
+    const previousDay = previousWeek?.days[activeWorkoutBaseDay];
+    if (!previousDay) {
+      return [];
+    }
+
+    const currentExerciseNames = new Set(currentWorkoutDay.exercises.map((exercise) => normalizeName(exercise.name)));
+    const seenRecommendations = new Set<string>();
+
+    return previousDay.exercises.reduce((recommendations, exercise) => {
+      const exerciseName = exercise.name.trim();
+      const recommendationKey = normalizeName(exerciseName);
+      const wasCompletedLastWeek = exercise.sets.some(
+        (set) => Boolean(completedSets[set.id]) || (safeNumber(set.weight) > 0 && safeNumber(set.reps) > 0),
+      );
+
+      if (!exerciseName || !wasCompletedLastWeek || currentExerciseNames.has(recommendationKey) || seenRecommendations.has(recommendationKey)) {
+        return recommendations;
+      }
+
+      seenRecommendations.add(recommendationKey);
+      return [...recommendations, exerciseName];
+    }, [] as string[]);
+  }, [activeWorkoutBaseDay, completedSets, currentWorkoutDay.exercises, previousWeek]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1579,6 +1603,29 @@ export default function App() {
     Vibration.vibrate([0, 35, 70, 35]);
   }, [restSeconds]);
 
+  useEffect(() => {
+    Keyboard.dismiss();
+  }, [activeTab]);
+
+  useEffect(() => {
+    const keyboardHideSubscription = Keyboard.addListener("keyboardDidHide", () => {
+      setShowExerciseRecommendations(false);
+    });
+
+    return () => {
+      keyboardHideSubscription.remove();
+    };
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (programmaticTabScrollTimerRef.current) {
+        clearTimeout(programmaticTabScrollTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const updateCurrentWeek = useCallback(
     (updater: (week: WeekEntry) => WeekEntry) => {
       setWeeks((previousWeeks) =>
@@ -1642,8 +1689,20 @@ export default function App() {
     [pageWidth],
   );
 
+  const clearProgrammaticTabScroll = useCallback(() => {
+    isProgrammaticTabScrollRef.current = false;
+    if (programmaticTabScrollTimerRef.current) {
+      clearTimeout(programmaticTabScrollTimerRef.current);
+      programmaticTabScrollTimerRef.current = null;
+    }
+  }, []);
+
   const handleTabScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (isProgrammaticTabScrollRef.current) {
+        return;
+      }
+
       syncActiveTabFromOffset(event.nativeEvent.contentOffset.x);
     },
     [syncActiveTabFromOffset],
@@ -1651,13 +1710,18 @@ export default function App() {
 
   const handleTabMomentumEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      clearProgrammaticTabScroll();
       syncActiveTabFromOffset(event.nativeEvent.contentOffset.x);
     },
-    [syncActiveTabFromOffset],
+    [clearProgrammaticTabScroll, syncActiveTabFromOffset],
   );
 
   const handleTabScrollEndDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (isProgrammaticTabScrollRef.current) {
+        return;
+      }
+
       const velocityX = event.nativeEvent.velocity?.x ?? 0;
       if (Math.abs(velocityX) < 0.05) {
         syncActiveTabFromOffset(event.nativeEvent.contentOffset.x);
@@ -1673,6 +1737,16 @@ export default function App() {
         return;
       }
 
+      Keyboard.dismiss();
+      isProgrammaticTabScrollRef.current = true;
+      if (programmaticTabScrollTimerRef.current) {
+        clearTimeout(programmaticTabScrollTimerRef.current);
+      }
+      programmaticTabScrollTimerRef.current = setTimeout(() => {
+        isProgrammaticTabScrollRef.current = false;
+        programmaticTabScrollTimerRef.current = null;
+        setActiveTab(tab);
+      }, 650);
       setActiveTab(tab);
       tabPagerRef.current?.scrollTo({ animated: true, x: nextIndex * pageWidth, y: 0 });
     },
@@ -2025,7 +2099,25 @@ export default function App() {
       exercises: [...day.exercises, makeExercise(trimmedName)],
     }));
     setNewExerciseName("");
+    setShowExerciseRecommendations(false);
   }, [newExerciseName, updateCurrentWorkoutDay]);
+
+  const addRecommendedExercise = useCallback((exerciseName: string) => {
+    updateCurrentWorkoutDay((day) => {
+      const recommendationKey = normalizeName(exerciseName);
+      const alreadyExists = day.exercises.some((exercise) => normalizeName(exercise.name) === recommendationKey);
+      if (alreadyExists) {
+        return day;
+      }
+
+      return {
+        ...day,
+        exercises: [...day.exercises, makeExercise(exerciseName)],
+      };
+    });
+    Keyboard.dismiss();
+    setShowExerciseRecommendations(false);
+  }, [updateCurrentWorkoutDay]);
 
   const clearCompletedSetIds = useCallback((setIds: string[]) => {
     if (setIds.length === 0) {
@@ -2055,7 +2147,6 @@ export default function App() {
       exercises: day.exercises.filter((exercise) => exercise.id !== exerciseId),
     }));
     clearCompletedSetIds(exerciseToRemove?.sets.map((set) => set.id) ?? []);
-    setSwipedExerciseId(null);
   }, [clearCompletedSetIds, currentWorkoutDay.exercises, updateCurrentWorkoutDay]);
 
   const moveExercise = useCallback((exerciseId: string, direction: -1 | 1) => {
@@ -2075,7 +2166,6 @@ export default function App() {
         exercises: nextExercises,
       };
     });
-    setSwipedExerciseId(null);
   }, [updateCurrentWorkoutDay]);
 
   const addSet = useCallback((exerciseId: string) => {
@@ -2275,28 +2365,6 @@ export default function App() {
     });
   }, []);
 
-  const beginExerciseSwipe = useCallback((exerciseId: string, x: number, y: number) => {
-    exerciseSwipeStartRef.current = { exerciseId, x, y };
-  }, []);
-
-  const finishExerciseSwipe = useCallback((exerciseId: string, x: number, y: number) => {
-    const start = exerciseSwipeStartRef.current;
-    exerciseSwipeStartRef.current = null;
-
-    if (!start || start.exerciseId !== exerciseId) {
-      return;
-    }
-
-    const deltaX = x - start.x;
-    const deltaY = y - start.y;
-
-    if (Math.abs(deltaY) > EXERCISE_SWIPE_VERTICAL_TOLERANCE || Math.abs(deltaX) < EXERCISE_SWIPE_THRESHOLD) {
-      return;
-    }
-
-    setSwipedExerciseId(deltaX < 0 ? exerciseId : null);
-  }, []);
-
   const toggleSetComplete = useCallback((setId: string) => {
     const shouldStartTimer = !completedSets[setId];
     const completedAt = new Date();
@@ -2371,6 +2439,8 @@ export default function App() {
   }, []);
 
   const selectWorkoutDay = useCallback((dayId: string) => {
+    Keyboard.dismiss();
+    setShowExerciseRecommendations(false);
     setActiveWorkoutDayId(dayId);
     if (DAY_NAMES.includes(dayId as WorkoutDayName)) {
       setActiveDay(dayId as WorkoutDayName);
@@ -2502,7 +2572,11 @@ export default function App() {
           <TouchableOpacity
             activeOpacity={0.8}
             key={dayName}
-            onPress={() => setActiveDay(dayName)}
+            onPress={() => {
+              Keyboard.dismiss();
+              setShowExerciseRecommendations(false);
+              setActiveDay(dayName);
+            }}
             style={[styles.dayTab, isActive && styles.activeDayTab]}
           >
             <Text style={[styles.dayTabText, isActive && styles.activeDayTabText]}>{dayName}</Text>
@@ -2712,6 +2786,32 @@ export default function App() {
     [currentLevelXP, gamificationStats.streakCount, gamificationStats.totalXP, gymLevel, levelProgress, styles],
   );
 
+  const renderRecommendedExercises = useCallback(() => {
+    if (!showExerciseRecommendations || recommendedExercises.length === 0) {
+      return null;
+    }
+
+    return (
+      <View style={styles.recommendedExercisePanel}>
+        <Text style={styles.recommendedExerciseTitle}>Recommended Exercises</Text>
+        <Text style={styles.recommendedExerciseSubtitle}>Based on what you completed last week.</Text>
+        <View style={styles.recommendedExerciseList}>
+          {recommendedExercises.map((exerciseName) => (
+            <TouchableOpacity
+              activeOpacity={0.84}
+              key={exerciseName}
+              onPress={() => addRecommendedExercise(exerciseName)}
+              style={styles.recommendedExerciseButton}
+            >
+              <Text numberOfLines={1} style={styles.recommendedExerciseText}>{exerciseName}</Text>
+              <Text style={styles.recommendedExerciseAdd}>Add</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+    );
+  }, [addRecommendedExercise, recommendedExercises, showExerciseRecommendations, styles]);
+
   const renderWorkoutHeader = useCallback(
     () => (
       <>
@@ -2739,7 +2839,10 @@ export default function App() {
 
         <View style={styles.addExerciseRow}>
           <TextInput
+            blurOnSubmit={false}
+            key={`${activeWorkoutDayId}-add-exercise`}
             onChangeText={setNewExerciseName}
+            onFocus={() => setShowExerciseRecommendations(true)}
             placeholder="Add exercise"
             placeholderTextColor={theme.placeholder}
             returnKeyType="done"
@@ -2751,15 +2854,18 @@ export default function App() {
             <Text style={styles.primaryButtonText}>Add</Text>
           </TouchableOpacity>
         </View>
+        {renderRecommendedExercises()}
       </>
     ),
     [
       addExercise,
+      activeWorkoutDayId,
       currentWeek.weekNumber,
       currentWorkoutDayLabel,
       newExerciseName,
       renderRestTimer,
       renderGamificationCard,
+      renderRecommendedExercises,
       renderStorageWarning,
       renderWeekSelector,
       renderWorkoutDayTabs,
@@ -2783,29 +2889,16 @@ export default function App() {
     ({ item: exercise, index: exerciseIndex }: ListRenderItemInfo<ExerciseEntry>) => {
       const hasPreviousSets = Boolean(findPreviousExercise(exercise, exerciseIndex)?.sets.length);
       const oneRepMax = calculateExerciseOneRepMax(exercise);
-      const isSwipeOpen = swipedExerciseId === exercise.id;
 
       return (
-        <View
-          onTouchCancel={() => {
-            exerciseSwipeStartRef.current = null;
-          }}
-          onTouchEnd={(event) => finishExerciseSwipe(exercise.id, event.nativeEvent.pageX, event.nativeEvent.pageY)}
-          onTouchStart={(event) => beginExerciseSwipe(exercise.id, event.nativeEvent.pageX, event.nativeEvent.pageY)}
-          style={styles.exerciseSwipeFrame}
-        >
-          {isSwipeOpen ? (
-            <View style={styles.swipeActionRail}>
-              <TouchableOpacity activeOpacity={0.82} onPress={() => removeExercise(exercise.id)} style={styles.swipeDeleteButton}>
-                <Text style={styles.swipeDeleteText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null}
-          <View style={[styles.exerciseCard, isSwipeOpen && styles.exerciseCardSwiped]}>
+        <View style={styles.exerciseSwipeFrame}>
+          <View style={styles.exerciseCard}>
             <View style={styles.exerciseAccentLine} />
             <View style={styles.exerciseHeader}>
               <View style={styles.exerciseTitleWrap}>
                 <TextInput
+                  blurOnSubmit={false}
+                  key={`${exercise.id}-exercise-name`}
                   onChangeText={(value) =>
                     updateExercise(exercise.id, (currentExercise) => ({
                       ...currentExercise,
@@ -2902,13 +2995,11 @@ export default function App() {
     [
       addSet,
       adjustSetWeight,
-      beginExerciseSwipe,
       completedSets,
       copyPreviousSets,
       currentWeek.bodyweight.unit,
       currentWorkoutDay.exercises.length,
       findPreviousExercise,
-      finishExerciseSwipe,
       getPreviousSet,
       moveExercise,
       openPlateCalculator,
@@ -2917,7 +3008,6 @@ export default function App() {
       removeSet,
       setProgressStatus,
       styles,
-      swipedExerciseId,
       toggleSetComplete,
       updateExercise,
       updateSet,
@@ -2936,7 +3026,7 @@ export default function App() {
         keyboardShouldPersistTaps="handled"
         keyExtractor={exerciseKeyExtractor}
         ListEmptyComponent={renderWorkoutEmpty}
-        ListHeaderComponent={renderWorkoutHeader}
+        ListHeaderComponent={renderWorkoutHeader()}
         maxToRenderPerBatch={4}
         onScroll={handleWorkoutScroll}
         ref={workoutListRef}
@@ -3588,7 +3678,7 @@ export default function App() {
                 bounces={false}
                 contentContainerStyle={styles.tabPagerContent}
                 decelerationRate="fast"
-                directionalLockEnabled
+                disableIntervalMomentum
                 horizontal
                 keyboardDismissMode={KEYBOARD_DISMISS_MODE}
                 keyboardShouldPersistTaps="handled"
@@ -3601,6 +3691,8 @@ export default function App() {
                 ref={tabPagerRef}
                 scrollEventThrottle={16}
                 showsHorizontalScrollIndicator={false}
+                snapToAlignment="start"
+                snapToInterval={pageWidth}
               >
                 {APP_TABS.map((tab) => (
                   <View key={tab} style={[styles.tabPage, { width: pageWidth }]}>
@@ -4063,6 +4155,53 @@ function createStyles(theme: ThemeTokens) {
     fontSize: 14,
     fontWeight: "900",
   },
+  recommendedExercisePanel: {
+    backgroundColor: surfaceElevated,
+    borderColor: border,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 10,
+    marginBottom: 16,
+    padding: 14,
+  },
+  recommendedExerciseTitle: {
+    color: theme.strongText,
+    fontSize: 16,
+    fontWeight: "900",
+  },
+  recommendedExerciseSubtitle: {
+    color: theme.mutedText,
+    fontSize: 12,
+    fontWeight: "800",
+    marginTop: -5,
+  },
+  recommendedExerciseList: {
+    gap: 8,
+  },
+  recommendedExerciseButton: {
+    alignItems: "center",
+    backgroundColor: surface,
+    borderColor: inputBorder,
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    justifyContent: "space-between",
+    minHeight: 44,
+    paddingHorizontal: 12,
+  },
+  recommendedExerciseText: {
+    color: theme.text,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  recommendedExerciseAdd: {
+    color: accent,
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
   emptyState: {
     alignItems: "center",
     backgroundColor: surface,
@@ -4087,29 +4226,6 @@ function createStyles(theme: ThemeTokens) {
     overflow: "hidden",
     position: "relative",
   },
-  swipeActionRail: {
-    bottom: 0,
-    justifyContent: "center",
-    position: "absolute",
-    right: 0,
-    top: 0,
-    width: 88,
-  },
-  swipeDeleteButton: {
-    alignItems: "center",
-    backgroundColor: coral,
-    borderColor: coral,
-    borderRadius: 12,
-    borderWidth: 1,
-    flex: 1,
-    justifyContent: "center",
-  },
-  swipeDeleteText: {
-    color: theme.inverseText,
-    fontSize: 12,
-    fontWeight: "900",
-    textTransform: "uppercase",
-  },
   exerciseCard: {
     backgroundColor: surfaceElevated,
     borderColor: border,
@@ -4123,9 +4239,6 @@ function createStyles(theme: ThemeTokens) {
     height: 3,
     marginBottom: 14,
     width: 42,
-  },
-  exerciseCardSwiped: {
-    transform: [{ translateX: -88 }],
   },
   exerciseHeader: {
     alignItems: "center",
