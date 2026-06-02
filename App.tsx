@@ -366,26 +366,6 @@ const createBlankWeek = (weekNumber: number, previousWeek?: WeekEntry): WeekEntr
   return makeWeek(weekNumber, { value: "", unit }, days);
 };
 
-const applyCalorieTargetToBaseDays = (week: WeekEntry, target: string): WeekEntry => {
-  const nextDays = { ...week.days };
-
-  DAY_NAMES.forEach((dayName) => {
-    const day = week.days[dayName];
-    nextDays[dayName] = {
-      ...day,
-      calories: {
-        ...day.calories,
-        target,
-      },
-    };
-  });
-
-  return {
-    ...week,
-    days: nextDays,
-  };
-};
-
 const MOCK_WEEKS: WeekEntry[] = [
   makeWeek(
     1,
@@ -1299,7 +1279,7 @@ export default function App() {
   const isBaseWorkoutDay = DAY_NAMES.includes(activeWorkoutDayId as WorkoutDayName);
   const activeWorkoutBaseDay: WorkoutDayName = isBaseWorkoutDay
     ? (activeWorkoutDayId as WorkoutDayName)
-    : activeExtraWorkoutDay?.baseDay ?? activeDay;
+    : activeExtraWorkoutDay?.baseDay ?? "Push";
   const currentWorkoutDay = activeExtraWorkoutDay ?? currentWeek.days[activeWorkoutBaseDay];
   const currentWorkoutDayLabel = activeExtraWorkoutDay?.label ?? activeWorkoutBaseDay;
   const theme = APP_THEME;
@@ -1539,16 +1519,29 @@ export default function App() {
 
     setWeeks((previousWeeks) =>
       previousWeeks.map((week, index) => {
-        if (index !== activeWeekIndex) {
+        if (index !== activeWeekIndex || week.days[activeDay].calories.target === resolvedTarget.target) {
           return week;
         }
 
-        const needsTargetSync = DAY_NAMES.some((dayName) => week.days[dayName].calories.target !== resolvedTarget.target);
-        return needsTargetSync ? applyCalorieTargetToBaseDays(week, resolvedTarget.target) : week;
+        const day = week.days[activeDay];
+        return {
+          ...week,
+          days: {
+            ...week.days,
+            [activeDay]: {
+              ...day,
+              calories: {
+                ...day.calories,
+                target: resolvedTarget.target,
+              },
+            },
+          },
+        };
       }),
     );
   }, [
     activeWeekIndex,
+    activeDay,
     currentDay.calories.target,
     currentWeek,
     dailyCalorieTargets,
@@ -2228,7 +2221,13 @@ export default function App() {
   }, [findPreviousExercise, updateExercise]);
 
   const updateCalorieTarget = useCallback((value: string) => {
-    updateCurrentWeek((week) => applyCalorieTargetToBaseDays(week, value));
+    updateCurrentDay((day) => ({
+      ...day,
+      calories: {
+        ...day.calories,
+        target: value,
+      },
+    }));
 
     if (safeNumber(value) > 0) {
       setDailyCalorieTargets((previousTargets) => ({
@@ -2236,7 +2235,7 @@ export default function App() {
         [todayDateKey]: value,
       }));
     }
-  }, [todayDateKey, updateCurrentWeek]);
+  }, [todayDateKey, updateCurrentDay]);
 
   const setCalorieDraft = useCallback((field: keyof FoodDraft, value: string) => {
     setCalorieDrafts((previousDrafts) => ({
@@ -2442,15 +2441,12 @@ export default function App() {
     Keyboard.dismiss();
     setShowExerciseRecommendations(false);
     setActiveWorkoutDayId(dayId);
-    if (DAY_NAMES.includes(dayId as WorkoutDayName)) {
-      setActiveDay(dayId as WorkoutDayName);
-    }
   }, []);
 
   const addExtraWorkoutDay = useCallback((preset: ExtraWorkoutDayPreset) => {
     const presetConfig = EXTRA_DAY_PRESETS.find((option) => option.label === preset) ?? EXTRA_DAY_PRESETS[0];
     const customLabel = customDayName.trim();
-    const baseDay = preset === "Custom" ? activeDay : presetConfig.baseDay;
+    const baseDay = preset === "Custom" ? activeWorkoutBaseDay : presetConfig.baseDay;
     const label = preset === "Custom" ? customLabel || `Custom Day ${currentExtraWorkoutDays.length + 1}` : presetConfig.label;
     const nextDay: ExtraWorkoutDayEntry = {
       id: makeId("extra_day"),
@@ -2468,7 +2464,7 @@ export default function App() {
     setActiveWorkoutDayId(nextDay.id);
     setCustomDayName("");
     setIsAddDayModalVisible(false);
-  }, [activeDay, currentExtraWorkoutDays.length, currentWeek.days, currentWeek.id, customDayName]);
+  }, [activeWorkoutBaseDay, currentExtraWorkoutDays.length, currentWeek.days, currentWeek.id, customDayName]);
 
   const setRestTimerDuration = useCallback((duration: number) => {
     const nextDuration = Math.max(MIN_REST_SECONDS, Math.round(duration));
@@ -3060,7 +3056,7 @@ export default function App() {
       <View style={styles.heroHeader}>
         <View>
           <Text style={styles.screenTitle}>Nutrition</Text>
-          <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - {activeDay}, synced from Workouts.</Text>
+          <Text style={styles.screenSubtitle}>Week {currentWeek.weekNumber} - independent daily calories.</Text>
         </View>
         <TouchableOpacity activeOpacity={0.8} onPress={confirmResetNutrition} style={styles.nutritionResetButton}>
           <Text style={styles.nutritionResetText}>Reset</Text>
