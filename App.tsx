@@ -444,9 +444,15 @@ const emptyQuickCalorieDrafts = (): QuickCalorieDrafts => ({
 });
 
 const safeNumber = (value: string) => {
-  const parsed = Number(value);
+  const parsed = Number(value.trim().replace(/\s/g, "").replace(",", "."));
   return Number.isFinite(parsed) ? parsed : 0;
 };
+
+const formatDecimal = (value: number, useCommaDecimal: boolean) =>
+  value.toFixed(1).replace(".", useCommaDecimal ? "," : ".");
+
+const usesCommaDecimal = (...values: Array<string | undefined>) =>
+  values.some((value) => Boolean(value?.includes(",")));
 
 const formatRpeInput = (value: string) => {
   const digits = value.replace(/[^0-9]/g, "");
@@ -1205,7 +1211,7 @@ const WorkoutSetRow = React.memo(function WorkoutSetRow({
         </TouchableOpacity>
       </View>
       <View style={styles.previousLine}>
-        <Text style={styles.previousLineLabel}>Previous</Text>
+        <Text numberOfLines={1} style={styles.previousLineLabel}>Prev:</Text>
         <View style={styles.previousBadge}>
           <Text numberOfLines={1} style={styles.previousBadgeText}>
             {previousLabel}
@@ -1731,19 +1737,35 @@ export default function App() {
       }
 
       Keyboard.dismiss();
-      isProgrammaticTabScrollRef.current = true;
+      const currentIndex = APP_TABS.indexOf(activeTab);
+      const shouldAnimate = currentIndex >= 0 && Math.abs(nextIndex - currentIndex) <= 1;
+
+      if (activeTab === tab) {
+        return;
+      }
+
       if (programmaticTabScrollTimerRef.current) {
         clearTimeout(programmaticTabScrollTimerRef.current);
+        programmaticTabScrollTimerRef.current = null;
       }
+
+      setActiveTab(tab);
+
+      if (!shouldAnimate) {
+        isProgrammaticTabScrollRef.current = false;
+        tabPagerRef.current?.scrollTo({ animated: false, x: nextIndex * pageWidth, y: 0 });
+        return;
+      }
+
+      isProgrammaticTabScrollRef.current = true;
       programmaticTabScrollTimerRef.current = setTimeout(() => {
         isProgrammaticTabScrollRef.current = false;
         programmaticTabScrollTimerRef.current = null;
         setActiveTab(tab);
       }, 650);
-      setActiveTab(tab);
       tabPagerRef.current?.scrollTo({ animated: true, x: nextIndex * pageWidth, y: 0 });
     },
-    [pageWidth],
+    [activeTab, pageWidth],
   );
 
   const handleWorkoutScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -1768,18 +1790,42 @@ export default function App() {
 
   const findPreviousExercise = useCallback(
     (exercise: ExerciseEntry, exerciseIndex: number) => {
-      const previousDay = previousWeek?.days[activeWorkoutBaseDay];
-      if (!previousDay) {
+      if (!previousWeek) {
         return undefined;
       }
 
-      const namedMatch = previousDay.exercises.find(
-        (candidate) => normalizeName(candidate.name) !== "" && normalizeName(candidate.name) === normalizeName(exercise.name),
-      );
+      const previousExtraWorkoutDays = extraWorkoutDays[previousWeek.id] ?? [];
+      const matchingExtraDay = activeExtraWorkoutDay
+        ? previousExtraWorkoutDays.find((day) => normalizeName(day.label) === normalizeName(activeExtraWorkoutDay.label))
+        : undefined;
+      const previousDayCandidates: WorkoutDayContent[] = [];
 
-      return namedMatch ?? previousDay.exercises[exerciseIndex];
+      if (matchingExtraDay) {
+        previousDayCandidates.push(matchingExtraDay);
+      }
+
+      previousDayCandidates.push(previousWeek.days[activeWorkoutBaseDay]);
+
+      previousExtraWorkoutDays.forEach((day) => {
+        if (day.baseDay === activeWorkoutBaseDay && day.id !== matchingExtraDay?.id) {
+          previousDayCandidates.push(day);
+        }
+      });
+
+      previousExtraWorkoutDays.forEach((day) => {
+        if (day.baseDay !== activeWorkoutBaseDay) {
+          previousDayCandidates.push(day);
+        }
+      });
+
+      const exerciseName = normalizeName(exercise.name);
+      const namedMatch = previousDayCandidates
+        .flatMap((day) => day.exercises)
+        .find((candidate) => exerciseName !== "" && normalizeName(candidate.name) === exerciseName);
+
+      return namedMatch ?? previousDayCandidates[0]?.exercises[exerciseIndex];
     },
-    [activeWorkoutBaseDay, previousWeek],
+    [activeExtraWorkoutDay, activeWorkoutBaseDay, extraWorkoutDays, previousWeek],
   );
 
   const getPreviousSet = useCallback(
@@ -1793,12 +1839,12 @@ export default function App() {
       const previousSet = getPreviousSet(exercise, exerciseIndex, setIndex);
 
       if (!previousSet || (!previousSet.weight && !previousSet.reps)) {
-        return "Prev: --";
+        return "--";
       }
 
       const weight = previousSet.weight || "--";
       const reps = previousSet.reps || "--";
-      return `Prev: ${weight}${currentWeek.bodyweight.unit} x ${reps}`;
+      return `${weight}${currentWeek.bodyweight.unit} x ${reps}`;
     },
     [currentWeek.bodyweight.unit, getPreviousSet],
   );
@@ -1842,7 +1888,7 @@ export default function App() {
       }
 
       if (currentWeight > previousWeight || currentReps > previousReps) {
-        return { symbol: "▲", label: "Progressive overload", tone: "positive" };
+        return { symbol: "▲", label: "Progressive", tone: "positive" };
       }
 
       if (currentWeight === previousWeight && currentReps === previousReps) {
@@ -1976,7 +2022,10 @@ export default function App() {
     }
 
     const delta = currentWeight - previousWeight;
-    const roundedDelta = Math.abs(delta).toFixed(1);
+    const roundedDelta = formatDecimal(
+      Math.abs(delta),
+      usesCommaDecimal(currentWeek.bodyweight.value, previousWeek?.bodyweight.value),
+    );
 
     if (Math.abs(delta) < 0.05) {
       return { arrow: "=", label: `No change vs Week ${previousWeek?.weekNumber}`, tone: "neutral" };
@@ -3301,6 +3350,8 @@ export default function App() {
         <Text style={styles.labelText}>Current Bodyweight</Text>
         <View style={styles.weightValueRow}>
           <TextInput
+            blurOnSubmit={false}
+            key={`${currentWeek.id}-bodyweight`}
             keyboardType="decimal-pad"
             onChangeText={setBodyweightValue}
             placeholder="182.8"
@@ -3391,7 +3442,7 @@ export default function App() {
       keyboardDismissMode={KEYBOARD_DISMISS_MODE}
       keyboardShouldPersistTaps="handled"
       keyExtractor={weightHistoryKeyExtractor}
-      ListHeaderComponent={renderWeightHeader}
+      ListHeaderComponent={renderWeightHeader()}
       maxToRenderPerBatch={8}
       removeClippedSubviews={Platform.OS === "android"}
       renderItem={renderWeightHistoryItem}
@@ -4498,27 +4549,31 @@ function createStyles(theme: ThemeTokens) {
     borderColor: border,
     borderRadius: 8,
     borderWidth: 1,
-    flex: 1,
+    flex: 1.15,
     justifyContent: "center",
     minHeight: 42,
-    paddingHorizontal: 7,
+    minWidth: 120,
+    paddingHorizontal: 10,
   },
   previousLine: {
     alignItems: "center",
     flexDirection: "row",
     gap: 8,
-    paddingLeft: 32,
+    paddingLeft: 34,
     width: "100%",
   },
   previousLineLabel: {
     color: theme.mutedText,
+    flexShrink: 0,
     fontSize: 11,
     fontWeight: "900",
+    lineHeight: 14,
     textTransform: "uppercase",
+    width: 44,
   },
   previousBadgeText: {
     color: theme.strongText,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "800",
   },
   progressBadge: {
@@ -4526,11 +4581,12 @@ function createStyles(theme: ThemeTokens) {
     borderRadius: 999,
     borderWidth: 1,
     flexDirection: "row",
-    gap: 4,
+    gap: 6,
     justifyContent: "center",
     minHeight: 42,
-    paddingHorizontal: 8,
-    width: 118,
+    minWidth: 132,
+    paddingHorizontal: 10,
+    width: 138,
   },
   positiveProgressBadge: {
     backgroundColor: "rgba(47, 123, 255, 0.14)",
@@ -4545,13 +4601,14 @@ function createStyles(theme: ThemeTokens) {
     borderColor: border,
   },
   progressSymbol: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "900",
   },
   progressLabel: {
     flex: 1,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "900",
+    textAlign: "center",
   },
   positiveProgressText: {
     color: accent,
@@ -4698,20 +4755,23 @@ function createStyles(theme: ThemeTokens) {
     borderRadius: 12,
     borderWidth: 1,
     flexDirection: "row",
-    gap: 12,
+    gap: 14,
     marginTop: 12,
-    padding: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
   },
   weightProgressArrow: {
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: "900",
-    width: 32,
+    textAlign: "center",
+    width: 34,
   },
   weightProgressCopy: {
     flex: 1,
+    minWidth: 0,
   },
   weightProgressLabel: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "900",
   },
   weightProgressMeta: {
