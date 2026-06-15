@@ -180,6 +180,15 @@ const COMPLETED_SETS_STORAGE_KEY = "@iphone_gym_tracker/completed_sets_v1";
 const COMPLETED_DATES_STORAGE_KEY = "@iphone_gym_tracker/completed_dates_v1";
 const DAILY_CALORIE_TARGETS_STORAGE_KEY = "@iphone_gym_tracker/daily_calorie_targets_v1";
 const GAMIFICATION_STORAGE_KEY = "@iphone_gym_tracker/gamification_v1";
+const STORAGE_BACKUP_SUFFIX = ":backup_v1";
+type StoredJsonSource = "primary" | "backup";
+type StoredJsonResult<T> = {
+  found: boolean;
+  hadError: boolean;
+  source: StoredJsonSource | null;
+  value: T | null;
+};
+type StorageIssueOperation = "load" | "recover" | "save" | "validate";
 const DAY_NAMES: WorkoutDayName[] = ["Push", "Pull", "Legs"];
 const APP_TABS: AppTab[] = ["Workouts", "Nutrition", "Weight", "Stats", "Settings"];
 const REST_SECONDS = 90;
@@ -258,6 +267,114 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   macroTargetMode: "Auto",
   customMacroTargets: DEFAULT_MACRO_TARGETS,
+};
+const summarizeStorageError = (error: unknown) => {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+
+  return typeof error === "string" ? error : "Unknown storage error";
+};
+
+const storageBackupKey = (key: string) => `${key}${STORAGE_BACKUP_SUFFIX}`;
+
+const storageTimestamp = () => new Date().toISOString();
+
+const reportStorageIssue = (
+  operation: StorageIssueOperation,
+  key: string,
+  error: unknown,
+  details: Record<string, unknown> = {},
+) => {
+  console.warn("storage_issue", {
+    ...details,
+    error: summarizeStorageError(error),
+    key,
+    operation,
+    ts: storageTimestamp(),
+  });
+};
+
+const parseStoredJson = <T,>(
+  key: string,
+  rawValue: string,
+  normalize: (value: unknown) => T | null,
+  source: StoredJsonSource,
+): StoredJsonResult<T> => {
+  const normalizedValue = normalize(JSON.parse(rawValue));
+  if (normalizedValue === null) {
+    reportStorageIssue("validate", key, "Stored payload did not match the expected shape.", { source });
+    return { found: true, hadError: true, source, value: null };
+  }
+
+  return { found: true, hadError: false, source, value: normalizedValue };
+};
+
+const readStoredJsonSource = async <T,>(
+  key: string,
+  normalize: (value: unknown) => T | null,
+  source: StoredJsonSource,
+): Promise<StoredJsonResult<T>> => {
+  let rawValue: string | null = null;
+
+  try {
+    rawValue = await AsyncStorage.getItem(key);
+  } catch (error) {
+    reportStorageIssue("load", key, error, { source });
+    return { found: false, hadError: true, source, value: null };
+  }
+
+  if (!rawValue) {
+    return { found: false, hadError: false, source, value: null };
+  }
+
+  try {
+    return parseStoredJson(key, rawValue, normalize, source);
+  } catch (error) {
+    reportStorageIssue("load", key, error, { source });
+    return { found: true, hadError: true, source, value: null };
+  }
+};
+
+const loadStoredJson = async <T,>(
+  key: string,
+  normalize: (value: unknown) => T | null,
+): Promise<StoredJsonResult<T>> => {
+  const primary = await readStoredJsonSource(key, normalize, "primary");
+  if (primary.value !== null || (primary.found && !primary.hadError)) {
+    return primary;
+  }
+
+  const backup = await readStoredJsonSource(storageBackupKey(key), normalize, "backup");
+  if (backup.value !== null) {
+    reportStorageIssue("recover", key, "Recovered stored payload from backup.", {
+      primaryHadError: primary.hadError,
+    });
+    return { ...backup, hadError: true };
+  }
+
+  return {
+    found: primary.found || backup.found,
+    hadError: primary.hadError || backup.hadError,
+    source: backup.found ? backup.source : primary.source,
+    value: null,
+  };
+};
+
+const saveStoredJson = async (key: string, value: unknown) => {
+  const serializedValue = JSON.stringify(value);
+  try {
+    await AsyncStorage.setItem(storageBackupKey(key), serializedValue);
+  } catch (error) {
+    reportStorageIssue("save", key, error, { source: "backup" });
+  }
+
+  try {
+    await AsyncStorage.setItem(key, serializedValue);
+  } catch (error) {
+    reportStorageIssue("save", key, error, { source: "primary" });
+    throw error;
+  }
 };
 const APP_THEME: ThemeTokens = {
   background: "#000000",
@@ -680,12 +797,35 @@ const formatWeightEntryDate = (weeksLength: number, index: number) => {
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+
+const normalizeStoredNumber = (value: unknown, fallback = 0) => (isFiniteNumber(value) ? value : fallback);
+
+const normalizeStoredNonNegativeNumber = (value: unknown) => Math.max(0, normalizeStoredNumber(value));
+
+const isValidDateString = (value: string) => !Number.isNaN(new Date(value).getTime());
+
+const normalizeStoredDate = (value: unknown) =>
+  typeof value === "string" && isValidDateString(value) ? value : new Date().toISOString();
+
+const normalizeCompletedAt = (value: unknown) => {
+  if (typeof value === "string" && value.trim() && isValidDateString(value)) {
+    return value;
+  }
+
+  if (value === true) {
+    return new Date().toISOString();
+  }
+
+  return null;
+};
+
 const normalizeMacroValues = (value: unknown): MacroValues => {
   const record = asRecord(value);
   return {
-    protein: typeof record?.protein === "number" ? record.protein : 0,
-    carbs: typeof record?.carbs === "number" ? record.carbs : 0,
-    fats: typeof record?.fats === "number" ? record.fats : 0,
+    protein: normalizeStoredNonNegativeNumber(record?.protein),
+    carbs: normalizeStoredNonNegativeNumber(record?.carbs),
+    fats: normalizeStoredNonNegativeNumber(record?.fats),
   };
 };
 
@@ -733,7 +873,7 @@ const normalizeCalorieLog = (value: unknown): CalorieLog | null => {
         ? "macro"
         : "quick";
 
-  if ((type !== "add" && type !== "extract") || typeof amount !== "number") {
+  if ((type !== "add" && type !== "extract") || !isFiniteNumber(amount) || amount <= 0) {
     return null;
   }
 
@@ -744,7 +884,7 @@ const normalizeCalorieLog = (value: unknown): CalorieLog | null => {
     mode,
     label,
     macros,
-    createdAt: typeof record?.createdAt === "string" ? record.createdAt : new Date().toISOString(),
+    createdAt: normalizeStoredDate(record?.createdAt),
   };
 };
 
@@ -790,7 +930,7 @@ const normalizeExtraWorkoutDay = (value: unknown): ExtraWorkoutDayEntry | null =
     baseDay,
     exercises: rawExercises.map(normalizeExercise),
     calories: normalizeCalories(record.calories),
-    createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString(),
+    createdAt: normalizeStoredDate(record.createdAt),
   };
 };
 
@@ -817,7 +957,8 @@ const normalizeExtraWorkoutDaysByWeek = (value: unknown): ExtraWorkoutDaysByWeek
 
 const normalizeTimerSettings = (value: unknown): TimerSettings => {
   const record = asRecord(value);
-  const duration = typeof record?.duration === "number" && record.duration > 0 ? Math.round(record.duration) : REST_SECONDS;
+  const rawDuration = record?.duration;
+  const duration = isFiniteNumber(rawDuration) && rawDuration > 0 ? Math.round(rawDuration) : REST_SECONDS;
 
   return {
     enabled: typeof record?.enabled === "boolean" ? record.enabled : true,
@@ -845,13 +986,12 @@ const normalizeCompletedSets = (value: unknown): CompletedSetsById => {
   }
 
   return Object.entries(record).reduce((completed, [setId, rawValue]) => {
-    if (typeof rawValue === "string" && rawValue.trim()) {
-      completed[setId] = rawValue;
-    } else if (rawValue === true) {
-      completed[setId] = new Date().toISOString();
+    const completedAt = normalizeCompletedAt(rawValue);
+    if (completedAt) {
+      completed[setId] = completedAt;
     }
 
-  return completed;
+    return completed;
   }, {} as CompletedSetsById);
 };
 
@@ -909,8 +1049,8 @@ const normalizeGamificationStats = (value: unknown): GamificationStats => {
     return DEFAULT_GAMIFICATION_STATS;
   }
 
-  const rawStreak = typeof record.streakCount === "number" ? record.streakCount : 0;
-  const rawTotalXP = typeof record.totalXP === "number" ? record.totalXP : 0;
+  const rawTotalXP = normalizeStoredNumber(record.totalXP);
+  const rawStreak = normalizeStoredNumber(record.streakCount);
   const lastWorkoutDate =
     typeof record.lastWorkoutDate === "string" && isValidDateKey(record.lastWorkoutDate)
       ? record.lastWorkoutDate
@@ -1017,11 +1157,12 @@ const normalizeWeeks = (value: unknown): WeekEntry[] | null => {
     const bodyweight = asRecord(week?.bodyweight);
     const days = asRecord(week?.days);
     const rawUnit = bodyweight?.unit;
+    const rawWeekNumber = week?.weekNumber;
     const unit: WeightUnit = rawUnit === "kg" || rawUnit === "lbs" ? rawUnit : "lbs";
 
     return {
       id: typeof week?.id === "string" ? week.id : makeId("week"),
-      weekNumber: typeof week?.weekNumber === "number" ? week.weekNumber : index + 1,
+      weekNumber: isFiniteNumber(rawWeekNumber) && rawWeekNumber > 0 ? Math.floor(rawWeekNumber) : index + 1,
       bodyweight: {
         value: typeof bodyweight?.value === "string" ? bodyweight.value : "",
         unit,
@@ -1264,6 +1405,7 @@ export default function App() {
   const [showExerciseRecommendations, setShowExerciseRecommendations] = useState(false);
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const completedSetsRef = useRef<CompletedSetsById>({});
   const shouldVibrateWhenTimerEndsRef = useRef(false);
   const warnedAtThreeSecondsRef = useRef(false);
   const appliedDailyCalorieTargetRef = useRef<string | null>(null);
@@ -1322,72 +1464,89 @@ export default function App() {
   }, [activeWorkoutBaseDay, completedSets, currentWorkoutDay.exercises, previousWeek]);
 
   useEffect(() => {
+    completedSetsRef.current = completedSets;
+  }, [completedSets]);
+
+  useEffect(() => {
     let isMounted = true;
 
     const loadWeeks = async () => {
+      let hadStorageIssue = false;
+      const noteStorageIssue = (result: { hadError: boolean }) => {
+        hadStorageIssue = hadStorageIssue || result.hadError;
+      };
+      const loadStorageSlot = async <T,>(
+        key: string,
+        normalize: (value: unknown) => T | null,
+        applyValue: (value: T) => void,
+      ) => {
+        const result = await loadStoredJson(key, normalize);
+        noteStorageIssue(result);
+        if (result.value !== null && isMounted) {
+          applyValue(result.value);
+        }
+
+        return result;
+      };
+
       try {
-        const savedWeeks = await AsyncStorage.getItem(STORAGE_KEY);
-        if (savedWeeks) {
-          const parsedWeeks = normalizeWeeks(JSON.parse(savedWeeks));
-          if (parsedWeeks && isMounted) {
-            setWeeks(parsedWeeks);
-            setActiveWeekIndex(parsedWeeks.length - 1);
-          }
-        }
+        await loadStorageSlot(STORAGE_KEY, normalizeWeeks, (savedWeeks) => {
+          setWeeks(savedWeeks);
+          setActiveWeekIndex(savedWeeks.length - 1);
+        });
 
-        const savedExtraDays = await AsyncStorage.getItem(EXTRA_DAYS_STORAGE_KEY);
-        if (savedExtraDays && isMounted) {
-          setExtraWorkoutDays(normalizeExtraWorkoutDaysByWeek(JSON.parse(savedExtraDays)));
-        }
+        await loadStorageSlot(EXTRA_DAYS_STORAGE_KEY, normalizeExtraWorkoutDaysByWeek, setExtraWorkoutDays);
 
-        const savedCompletedSets = await AsyncStorage.getItem(COMPLETED_SETS_STORAGE_KEY);
-        let normalizedCompletedSets: CompletedSetsById = {};
-        if (savedCompletedSets && isMounted) {
-          normalizedCompletedSets = normalizeCompletedSets(JSON.parse(savedCompletedSets));
-          setCompletedSets(normalizedCompletedSets);
-        }
+        const savedCompletedSets = await loadStorageSlot(
+          COMPLETED_SETS_STORAGE_KEY,
+          normalizeCompletedSets,
+          (normalizedCompletedSets) => {
+            completedSetsRef.current = normalizedCompletedSets;
+            setCompletedSets(normalizedCompletedSets);
+          },
+        );
+        const normalizedCompletedSets = savedCompletedSets.value ?? {};
 
-        const savedCompletedDates = await AsyncStorage.getItem(COMPLETED_DATES_STORAGE_KEY);
+        const savedCompletedDates = await loadStoredJson(COMPLETED_DATES_STORAGE_KEY, normalizeCompletedDates);
+        noteStorageIssue(savedCompletedDates);
         if (isMounted) {
-          const normalizedCompletedDates = savedCompletedDates
-            ? normalizeCompletedDates(JSON.parse(savedCompletedDates))
-            : completedDatesFromCompletedSets(normalizedCompletedSets);
-          setCompletedDates(normalizedCompletedDates);
+          setCompletedDates(savedCompletedDates.value ?? completedDatesFromCompletedSets(normalizedCompletedSets));
         }
 
-        const savedDailyCalorieTargets = await AsyncStorage.getItem(DAILY_CALORIE_TARGETS_STORAGE_KEY);
-        if (savedDailyCalorieTargets && isMounted) {
-          setDailyCalorieTargets(normalizeDailyCalorieTargets(JSON.parse(savedDailyCalorieTargets)));
-        }
+        await loadStorageSlot(
+          DAILY_CALORIE_TARGETS_STORAGE_KEY,
+          normalizeDailyCalorieTargets,
+          setDailyCalorieTargets,
+        );
 
-        const savedGamification = await AsyncStorage.getItem(GAMIFICATION_STORAGE_KEY);
-        if (savedGamification && isMounted) {
-          setGamificationStats(normalizeGamificationStats(JSON.parse(savedGamification)));
-        }
+        await loadStorageSlot(GAMIFICATION_STORAGE_KEY, normalizeGamificationStats, setGamificationStats);
 
-        const savedAppSettings = await AsyncStorage.getItem(APP_SETTINGS_STORAGE_KEY);
-        const hasSavedAppSettings = Boolean(savedAppSettings);
-        if (savedAppSettings && isMounted) {
-          const normalizedSettings = normalizeAppSettings(JSON.parse(savedAppSettings));
-          setGoalMode(normalizedSettings.goalMode);
-          setTimerSettings(normalizedSettings.timerSettings);
-          setTimerDurationDraft(String(normalizedSettings.timerSettings.duration));
-          setMacroTargetMode(normalizedSettings.macroTargetMode);
-          setCustomMacroTargets(normalizedSettings.customMacroTargets);
-        }
+        const savedAppSettings = await loadStorageSlot(APP_SETTINGS_STORAGE_KEY, normalizeAppSettings, (savedSettings) => {
+          setGoalMode(savedSettings.goalMode);
+          setTimerSettings(savedSettings.timerSettings);
+          setTimerDurationDraft(String(savedSettings.timerSettings.duration));
+          setMacroTargetMode(savedSettings.macroTargetMode);
+          setCustomMacroTargets(savedSettings.customMacroTargets);
+        });
+        const hasSavedAppSettings = Boolean(savedAppSettings.value);
 
-        const savedTimerSettings = await AsyncStorage.getItem(TIMER_SETTINGS_STORAGE_KEY);
-        if (savedTimerSettings && !hasSavedAppSettings && isMounted) {
-          const normalizedSettings = normalizeTimerSettings(JSON.parse(savedTimerSettings));
-          setTimerSettings(normalizedSettings);
-          setTimerDurationDraft(String(normalizedSettings.duration));
+        const savedTimerSettings = await loadStoredJson(TIMER_SETTINGS_STORAGE_KEY, normalizeTimerSettings);
+        noteStorageIssue(savedTimerSettings);
+        if (savedTimerSettings.value !== null && !hasSavedAppSettings && isMounted) {
+          setTimerSettings(savedTimerSettings.value);
+          setTimerDurationDraft(String(savedTimerSettings.value.duration));
         }
-      } catch {
+      } catch (error) {
+        reportStorageIssue("load", "app_storage", error);
+        hadStorageIssue = true;
         if (isMounted) {
           setStorageError("Saved data could not be loaded. Showing starter weeks.");
         }
       } finally {
         if (isMounted) {
+          if (hadStorageIssue) {
+            setStorageError("Some saved data could not be loaded. Recovered what was valid.");
+          }
           setHasLoadedStorage(true);
         }
       }
@@ -1405,7 +1564,7 @@ export default function App() {
       return;
     }
 
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(weeks)).catch(() => {
+    saveStoredJson(STORAGE_KEY, weeks).catch(() => {
       setStorageError("Changes could not be saved to this device.");
     });
   }, [hasLoadedStorage, weeks]);
@@ -1415,7 +1574,7 @@ export default function App() {
       return;
     }
 
-    AsyncStorage.setItem(EXTRA_DAYS_STORAGE_KEY, JSON.stringify(extraWorkoutDays)).catch(() => {
+    saveStoredJson(EXTRA_DAYS_STORAGE_KEY, extraWorkoutDays).catch(() => {
       setStorageError("Extra workout days could not be saved to this device.");
     });
   }, [extraWorkoutDays, hasLoadedStorage]);
@@ -1425,7 +1584,7 @@ export default function App() {
       return;
     }
 
-    AsyncStorage.setItem(COMPLETED_SETS_STORAGE_KEY, JSON.stringify(completedSets)).catch(() => {
+    saveStoredJson(COMPLETED_SETS_STORAGE_KEY, completedSets).catch(() => {
       setStorageError("Completed sets could not be saved to this device.");
     });
   }, [completedSets, hasLoadedStorage]);
@@ -1435,7 +1594,7 @@ export default function App() {
       return;
     }
 
-    AsyncStorage.setItem(COMPLETED_DATES_STORAGE_KEY, JSON.stringify(completedDates)).catch(() => {
+    saveStoredJson(COMPLETED_DATES_STORAGE_KEY, completedDates).catch(() => {
       setStorageError("Completed dates could not be saved to this device.");
     });
   }, [completedDates, hasLoadedStorage]);
@@ -1445,7 +1604,7 @@ export default function App() {
       return;
     }
 
-    AsyncStorage.setItem(DAILY_CALORIE_TARGETS_STORAGE_KEY, JSON.stringify(dailyCalorieTargets)).catch(() => {
+    saveStoredJson(DAILY_CALORIE_TARGETS_STORAGE_KEY, dailyCalorieTargets).catch(() => {
       setStorageError("Daily calorie targets could not be saved to this device.");
     });
   }, [dailyCalorieTargets, hasLoadedStorage]);
@@ -1455,7 +1614,7 @@ export default function App() {
       return;
     }
 
-    AsyncStorage.setItem(GAMIFICATION_STORAGE_KEY, JSON.stringify(gamificationStats)).catch(() => {
+    saveStoredJson(GAMIFICATION_STORAGE_KEY, gamificationStats).catch(() => {
       setStorageError("Gamification progress could not be saved to this device.");
     });
   }, [gamificationStats, hasLoadedStorage]);
@@ -1494,7 +1653,7 @@ export default function App() {
       customMacroTargets,
     };
 
-    AsyncStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings)).catch(() => {
+    saveStoredJson(APP_SETTINGS_STORAGE_KEY, nextSettings).catch(() => {
       setStorageError("Settings could not be saved to this device.");
     });
   }, [customMacroTargets, goalMode, hasLoadedStorage, macroTargetMode, timerSettings]);
@@ -2113,6 +2272,7 @@ export default function App() {
     setActiveWeekIndex(nextActiveIndex);
     setActiveDay("Push");
     setActiveWorkoutDayId("Push");
+    completedSetsRef.current = {};
     setCompletedSets({});
     shouldVibrateWhenTimerEndsRef.current = false;
     warnedAtThreeSecondsRef.current = false;
@@ -2166,19 +2326,20 @@ export default function App() {
       return;
     }
 
-    setCompletedSets((previousCompletedSets) => {
-      const nextCompletedSets = { ...previousCompletedSets };
-      let changed = false;
+    const nextCompletedSets = { ...completedSetsRef.current };
+    let changed = false;
 
-      setIds.forEach((setId) => {
-        if (nextCompletedSets[setId]) {
-          delete nextCompletedSets[setId];
-          changed = true;
-        }
-      });
-
-      return changed ? nextCompletedSets : previousCompletedSets;
+    setIds.forEach((setId) => {
+      if (nextCompletedSets[setId]) {
+        delete nextCompletedSets[setId];
+        changed = true;
+      }
     });
+
+    if (changed) {
+      completedSetsRef.current = nextCompletedSets;
+      setCompletedSets(nextCompletedSets);
+    }
   }, []);
 
   const removeExercise = useCallback((exerciseId: string) => {
@@ -2414,20 +2575,25 @@ export default function App() {
   }, []);
 
   const toggleSetComplete = useCallback((setId: string) => {
-    const shouldStartTimer = !completedSets[setId];
+    const currentCompletedSets = completedSetsRef.current;
+    const shouldStartTimer = !currentCompletedSets[setId];
     const completedAt = new Date();
     const completedAtIso = completedAt.toISOString();
     const completedAtDateKey = formatDateKey(completedAt);
     const nextCompletedSets = shouldStartTimer
       ? {
-          ...completedSets,
+          ...currentCompletedSets,
           [setId]: completedAtIso,
         }
-      : completedSets;
+      : (() => {
+          const remainingCompletedSets = { ...currentCompletedSets };
+          delete remainingCompletedSets[setId];
+          return remainingCompletedSets;
+        })();
     const workoutBonusClaimKey = `${currentWeek.id}:${activeWorkoutDayId}`;
     const shouldClaimWorkoutBonus =
       shouldStartTimer &&
-      !isWorkoutDayFullyCompleted(currentWorkoutDay, completedSets) &&
+      !isWorkoutDayFullyCompleted(currentWorkoutDay, currentCompletedSets) &&
       isWorkoutDayFullyCompleted(currentWorkoutDay, nextCompletedSets);
 
     if (shouldStartTimer && timerSettings.enabled) {
@@ -2447,22 +2613,11 @@ export default function App() {
       );
     }
 
-    setCompletedSets((previousCompletedSets) => {
-      if (previousCompletedSets[setId]) {
-        const nextCompletedSets = { ...previousCompletedSets };
-        delete nextCompletedSets[setId];
-        return nextCompletedSets;
-      }
-
-      return {
-        ...previousCompletedSets,
-        [setId]: completedAtIso,
-      };
-    });
+    completedSetsRef.current = nextCompletedSets;
+    setCompletedSets(nextCompletedSets);
   }, [
     activeWorkoutDayId,
     addCompletedDateForToday,
-    completedSets,
     currentWeek.id,
     currentWorkoutDay,
     timerSettings.duration,
