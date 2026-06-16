@@ -5,6 +5,9 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "check": "npm run check:calendar && npm run check:safety && tsc --noEmit --pretty false",
+    "check:calendar": "node scripts/progressCalendar.check.mjs",
+    "check:safety": "node scripts/safety.check.mjs",
     "postinstall": "node scripts/patch-expo-logbox.js",
     "web": "expo start --web"
   },

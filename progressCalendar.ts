@@ -2,6 +2,7 @@ export type DateKeySanitizationResult = {
   dateKeys: string[];
   duplicateCount: number;
   invalidCount: number;
+  truncatedCount: number;
 };
 
 export type CalendarCell = {
@@ -29,6 +30,8 @@ type DateKeyParts = {
 };
 
 export const CALENDAR_WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+export const MAX_COMPLETED_DATE_KEYS = 10000;
+export const MAX_PROGRESS_HISTORY_WEEKS = 1200;
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -146,12 +149,14 @@ export const sanitizeCompletedDateKeys = (value: unknown): DateKeySanitizationRe
       dateKeys: [],
       duplicateCount: 0,
       invalidCount: value === undefined || value === null ? 0 : 1,
+      truncatedCount: 0,
     };
   }
 
   const seen = new Set<string>();
   let duplicateCount = 0;
   let invalidCount = 0;
+  let truncatedCount = 0;
   const dateKeys: string[] = [];
 
   value.forEach((rawDateKey) => {
@@ -171,6 +176,11 @@ export const sanitizeCompletedDateKeys = (value: unknown): DateKeySanitizationRe
       return;
     }
 
+    if (dateKeys.length >= MAX_COMPLETED_DATE_KEYS) {
+      truncatedCount += 1;
+      return;
+    }
+
     seen.add(dateKey);
     dateKeys.push(dateKey);
   });
@@ -179,6 +189,7 @@ export const sanitizeCompletedDateKeys = (value: unknown): DateKeySanitizationRe
     dateKeys,
     duplicateCount,
     invalidCount,
+    truncatedCount,
   };
 };
 
@@ -238,7 +249,7 @@ export const buildProgressHistoryWeeks = (
   let cursorKey = firstWeekStartKey;
   let guard = 0;
 
-  while ((getDateKeyDistance(cursorKey, lastWeekStartKey) ?? -1) >= 0 && guard < 1200) {
+  while ((getDateKeyDistance(cursorKey, lastWeekStartKey) ?? -1) >= 0 && guard < MAX_PROGRESS_HISTORY_WEEKS) {
     const cells = buildWeekCalendarCells(sanitizedCompletedDates, cursorKey, safeTodayKey);
     const endKey = addDaysToDateKey(cursorKey, 6) ?? cursorKey;
     weeks.push({

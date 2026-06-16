@@ -1,0 +1,65 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+const appSource = await readFile("App.tsx", "utf8");
+const calendarSource = await readFile("progressCalendar.ts", "utf8");
+const calendarCheckSource = await readFile("scripts/progressCalendar.check.mjs", "utf8");
+
+const countMatches = (source, pattern) => source.match(pattern)?.length ?? 0;
+
+assert.equal(
+  countMatches(appSource, /AsyncStorage\.getItem/g),
+  1,
+  "AsyncStorage reads should stay isolated in the storage loader helper",
+);
+assert.equal(
+  countMatches(appSource, /AsyncStorage\.setItem/g),
+  2,
+  "AsyncStorage writes should stay isolated in the storage save helper",
+);
+assert.equal(
+  countMatches(appSource, /JSON\.parse/g),
+  1,
+  "Stored JSON parsing should stay isolated in parseStoredJson",
+);
+assert.equal(
+  countMatches(appSource, /JSON\.stringify/g),
+  1,
+  "Stored JSON serialization should stay isolated in saveStoredJson",
+);
+assert.match(
+  appSource,
+  /source:\s*"serialize"/,
+  "JSON serialization failures should be logged with redacted structured context",
+);
+
+const consoleCalls = appSource.match(/console\.\w+\(/g) ?? [];
+assert(
+  consoleCalls.length > 0 && consoleCalls.every((call) => call === "console.warn("),
+  "App logging should stay limited to structured warning paths",
+);
+assert.equal(
+  countMatches(appSource, /console\.warn\("storage_issue"/g),
+  consoleCalls.length,
+  "Storage warnings should use the redacted storage_issue event",
+);
+
+[
+  "MAX_STORED_WEEKS",
+  "MAX_EXTRA_DAYS_PER_WEEK",
+  "MAX_EXERCISES_PER_DAY",
+  "MAX_SETS_PER_EXERCISE",
+  "MAX_CALORIE_LOGS_PER_DAY",
+  "MAX_COMPLETED_SET_IDS",
+  "MAX_DAILY_CALORIE_TARGETS",
+  "MAX_WORKOUT_BONUS_CLAIMS",
+  "MAX_REST_SECONDS",
+].forEach((constantName) => {
+  assert.match(appSource, new RegExp(`const ${constantName} =`), `${constantName} should be explicit`);
+});
+
+assert.match(calendarSource, /MAX_COMPLETED_DATE_KEYS/, "Completed date keys should have an explicit safety cap");
+assert.match(calendarSource, /MAX_PROGRESS_HISTORY_WEEKS/, "Progress history should have an explicit rendering cap");
+assert.match(calendarCheckSource, /truncatedCount/, "Calendar checks should cover capped completed-date inputs");
+
+console.log("safety checks passed");

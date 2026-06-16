@@ -22,6 +22,8 @@ const {
   buildProgressHistoryWeeks,
   buildWeekCalendarCells,
   getStartOfWeekDateKey,
+  MAX_COMPLETED_DATE_KEYS,
+  MAX_PROGRESS_HISTORY_WEEKS,
   sanitizeCompletedDateKeys,
 } = await import(pathToFileURL(tempModulePath).href);
 
@@ -53,6 +55,18 @@ const invalid = sanitizeCompletedDateKeys(["2026-02-31", "not-a-date", 12, "2026
 assert.deepEqual(invalid.dateKeys, ["2026-06-16"], "invalid stored date keys should be ignored");
 assert.equal(invalid.invalidCount, 3, "invalid count should be reported");
 
+const excessiveDates = Array.from({ length: MAX_COMPLETED_DATE_KEYS + 2 }, (_, index) => {
+  const date = new Date(Date.UTC(2000, 0, 1 + index));
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+});
+const truncated = sanitizeCompletedDateKeys(excessiveDates);
+assert.equal(truncated.dateKeys.length, MAX_COMPLETED_DATE_KEYS, "completed date keys should have a safe cap");
+assert(truncated.truncatedCount > 0, "truncated completed date keys should be reported");
+
 const fullHistoryWeeks = buildProgressHistoryWeeks(["2026-04-01", "2026-06-16"], "2026-06-16", 1);
 assert.equal(fullHistoryWeeks[0].startKey, "2026-06-15", "full history should show the newest week first");
 assert.equal(
@@ -68,5 +82,8 @@ assert(
   fullHistoryWeeks.some((week) => week.cells.some((cell) => cell.key === "2026-04-01" && cell.completed)),
   "full history should preserve older completed progress dates",
 );
+
+const longHistory = buildProgressHistoryWeeks(["1900-01-01"], "2026-06-16", 1);
+assert(longHistory.length <= MAX_PROGRESS_HISTORY_WEEKS, "full history rendering should have a safe week cap");
 
 console.log("progressCalendar checks passed");

@@ -223,6 +223,15 @@ const STREAK_WINDOW_DAYS = 7;
 const XP_PER_COMPLETED_SET = 10;
 const XP_PER_COMPLETED_WORKOUT_DAY = 50;
 const XP_PER_LEVEL = 500;
+const MAX_STORED_WEEKS = 520;
+const MAX_EXTRA_DAYS_PER_WEEK = 365;
+const MAX_EXERCISES_PER_DAY = 100;
+const MAX_SETS_PER_EXERCISE = 100;
+const MAX_CALORIE_LOGS_PER_DAY = 5000;
+const MAX_COMPLETED_SET_IDS = 50000;
+const MAX_DAILY_CALORIE_TARGETS = 10000;
+const MAX_WORKOUT_BONUS_CLAIMS = 50000;
+const MAX_REST_SECONDS = 24 * 60 * 60;
 const DEFAULT_MACRO_TARGETS: MacroDrafts = {
   protein: "180",
   carbs: "250",
@@ -371,7 +380,14 @@ const loadStoredJson = async <T,>(
 };
 
 const saveStoredJson = async (key: string, value: unknown) => {
-  const serializedValue = JSON.stringify(value);
+  let serializedValue: string;
+  try {
+    serializedValue = JSON.stringify(value);
+  } catch (error) {
+    reportStorageIssue("save", key, error, { source: "serialize" });
+    throw error;
+  }
+
   try {
     await AsyncStorage.setItem(storageBackupKey(key), serializedValue);
   } catch (error) {
@@ -761,6 +777,8 @@ const formatWeightEntryDate = (weeksLength: number, index: number) => {
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 
+const limitStoredItems = <T,>(items: T[], limit: number) => items.slice(0, Math.max(0, limit));
+
 const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
 const normalizeStoredNumber = (value: unknown, fallback = 0) => (isFiniteNumber(value) ? value : fallback);
@@ -815,7 +833,7 @@ const normalizeSet = (value: unknown): WorkoutSet => {
 const normalizeExercise = (value: unknown): ExerciseEntry => {
   const record = asRecord(value);
   const rawSets = Array.isArray(record?.sets) ? record.sets : [];
-  const sets = rawSets.length > 0 ? rawSets.map(normalizeSet) : [makeSet()];
+  const sets = rawSets.length > 0 ? limitStoredItems(rawSets, MAX_SETS_PER_EXERCISE).map(normalizeSet) : [makeSet()];
 
   return {
     id: typeof record?.id === "string" ? record.id : makeId("exercise"),
@@ -858,7 +876,7 @@ const normalizeCalories = (value: unknown): DayCalories => {
 
   return {
     target: typeof record?.target === "string" ? record.target : "2500",
-    logs: rawLogs
+    logs: limitStoredItems(rawLogs, MAX_CALORIE_LOGS_PER_DAY)
       .map(normalizeCalorieLog)
       .filter((log): log is CalorieLog => Boolean(log))
       .filter((log) => !isStarterCalorieLog(log)),
@@ -871,7 +889,7 @@ const normalizeDay = (name: WorkoutDayName, value: unknown): WorkoutDayEntry => 
 
   return {
     name,
-    exercises: rawExercises.map(normalizeExercise),
+    exercises: limitStoredItems(rawExercises, MAX_EXERCISES_PER_DAY).map(normalizeExercise),
     calories: normalizeCalories(record?.calories),
   };
 };
@@ -906,7 +924,7 @@ const normalizeExtraWorkoutDaysByWeek = (value: unknown): ExtraWorkoutDaysByWeek
 
   return Object.entries(record).reduce((accumulator, [weekId, rawDays]) => {
     if (Array.isArray(rawDays)) {
-      const normalizedDays = rawDays
+      const normalizedDays = limitStoredItems(rawDays, MAX_EXTRA_DAYS_PER_WEEK)
         .map(normalizeExtraWorkoutDay)
         .filter((day): day is ExtraWorkoutDayEntry => Boolean(day));
 
@@ -926,7 +944,7 @@ const normalizeTimerSettings = (value: unknown): TimerSettings => {
 
   return {
     enabled: typeof record?.enabled === "boolean" ? record.enabled : true,
-    duration: Math.max(MIN_REST_SECONDS, duration),
+    duration: Math.min(MAX_REST_SECONDS, Math.max(MIN_REST_SECONDS, duration)),
   };
 };
 
@@ -949,7 +967,7 @@ const normalizeCompletedSets = (value: unknown): CompletedSetsById => {
     return {};
   }
 
-  return Object.entries(record).reduce((completed, [setId, rawValue]) => {
+  return limitStoredItems(Object.entries(record), MAX_COMPLETED_SET_IDS).reduce((completed, [setId, rawValue]) => {
     const completedAt = normalizeCompletedAt(rawValue);
     if (completedAt) {
       completed[setId] = completedAt;
@@ -961,10 +979,11 @@ const normalizeCompletedSets = (value: unknown): CompletedSetsById => {
 
 const normalizeCompletedDates = (value: unknown): CompletedDates => {
   const result = sanitizeCompletedDateKeys(value);
-  if (result.invalidCount > 0 || result.duplicateCount > 0) {
-    reportStorageIssue("validate", COMPLETED_DATES_STORAGE_KEY, "Ignored invalid or duplicate completed date keys.", {
+  if (result.invalidCount > 0 || result.duplicateCount > 0 || result.truncatedCount > 0) {
+    reportStorageIssue("validate", COMPLETED_DATES_STORAGE_KEY, "Ignored invalid, duplicate, or excessive completed date keys.", {
       duplicateCount: result.duplicateCount,
       invalidCount: result.invalidCount,
+      truncatedCount: result.truncatedCount,
     });
   }
 
@@ -977,7 +996,7 @@ const normalizeDailyCalorieTargets = (value: unknown): DailyCalorieTargets => {
     return {};
   }
 
-  return Object.entries(record).reduce((targets, [dateKey, target]) => {
+  return limitStoredItems(Object.entries(record), MAX_DAILY_CALORIE_TARGETS).reduce((targets, [dateKey, target]) => {
     if (isValidDateKey(dateKey) && typeof target === "string" && safeNumber(target) > 0) {
       targets[dateKey] = target;
     }
@@ -992,7 +1011,7 @@ const normalizeWorkoutBonusClaims = (value: unknown): Record<string, string> => 
     return {};
   }
 
-  return Object.entries(record).reduce((claims, [claimKey, dateKey]) => {
+  return limitStoredItems(Object.entries(record), MAX_WORKOUT_BONUS_CLAIMS).reduce((claims, [claimKey, dateKey]) => {
     if (typeof claimKey === "string" && typeof dateKey === "string" && isValidDateKey(dateKey)) {
       claims[claimKey] = dateKey;
     }
@@ -1135,7 +1154,7 @@ const normalizeWeeks = (value: unknown): WeekEntry[] | null => {
     return null;
   }
 
-  return value.map((weekValue, index) => {
+  return limitStoredItems(value, MAX_STORED_WEEKS).map((weekValue, index) => {
     const week = asRecord(weekValue);
     const bodyweight = asRecord(week?.bodyweight);
     const days = asRecord(week?.days);
