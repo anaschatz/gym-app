@@ -23,6 +23,21 @@ export type CalendarWeek = {
   cells: CalendarCell[];
 };
 
+export type CalendarMonthCell = CalendarCell & {
+  dateKey: string | null;
+  isBlank: boolean;
+};
+
+export type CalendarMonth = {
+  key: string;
+  monthKey: string;
+  label: string;
+  year: number;
+  month: number;
+  completedCount: number;
+  cells: CalendarMonthCell[];
+};
+
 type DateKeyParts = {
   year: number;
   month: number;
@@ -32,8 +47,23 @@ type DateKeyParts = {
 export const CALENDAR_WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 export const MAX_COMPLETED_DATE_KEYS = 10000;
 export const MAX_PROGRESS_HISTORY_WEEKS = 1200;
+export const MAX_PROGRESS_HISTORY_MONTHS = Math.ceil(MAX_PROGRESS_HISTORY_WEEKS / 4);
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const FULL_MONTH_LABELS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const FALLBACK_DATE_KEY = "1970-01-05";
 
@@ -140,6 +170,51 @@ const formatShortDateLabel = (dateKey: string) => {
   return parts ? `${MONTH_LABELS[parts.month - 1]} ${parts.day}` : "";
 };
 
+const formatMonthKeyParts = ({ year, month }: Pick<DateKeyParts, "year" | "month">) =>
+  `${year}-${String(month).padStart(2, "0")}`;
+
+const getMonthKeyFromDateKey = (dateKey: string) => {
+  const parts = parseDateKeyParts(dateKey);
+  return parts ? formatMonthKeyParts(parts) : null;
+};
+
+const parseMonthKeyParts = (monthKey: string) => {
+  const match = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return null;
+  }
+
+  return { year, month };
+};
+
+const addMonthsToMonthKey = (monthKey: string, monthOffset: number) => {
+  const parts = parseMonthKeyParts(monthKey);
+  if (!parts || !Number.isFinite(monthOffset)) {
+    return null;
+  }
+
+  const date = new Date(Date.UTC(parts.year, parts.month - 1 + Math.trunc(monthOffset), 1));
+  return formatMonthKeyParts({ year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 });
+};
+
+const getMonthKeyDistance = (fromMonthKey: string, toMonthKey: string) => {
+  const fromParts = parseMonthKeyParts(fromMonthKey);
+  const toParts = parseMonthKeyParts(toMonthKey);
+  if (!fromParts || !toParts) {
+    return null;
+  }
+
+  return (toParts.year - fromParts.year) * 12 + (toParts.month - fromParts.month);
+};
+
+const getDaysInMonth = (year: number, month: number) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+
 const buildCompletedDateKeySet = (completedDates: readonly string[]) =>
   new Set(sanitizeCompletedDateKeys(completedDates).dateKeys);
 
@@ -222,6 +297,132 @@ export const buildWeekCalendarCells = (
       isToday: dateKey === todayKey,
     };
   });
+};
+
+export const buildMonthCalendarCells = (
+  completedDates: readonly string[],
+  monthKey: string,
+  todayKey = formatDateKey(new Date()),
+): CalendarMonthCell[] => {
+  const parts = parseMonthKeyParts(monthKey);
+  if (!parts) {
+    return [];
+  }
+
+  const completedDateKeys = buildCompletedDateKeySet(completedDates);
+  const safeTodayKey = getSafeDateKey(todayKey, formatDateKey(new Date()));
+  const firstDay = new Date(Date.UTC(parts.year, parts.month - 1, 1));
+  const leadingBlankCount = (firstDay.getUTCDay() + 6) % 7;
+  const daysInMonth = getDaysInMonth(parts.year, parts.month);
+  const monthLabel = MONTH_LABELS[parts.month - 1];
+  const blankCell = (index: number, weekdayIndex: number): CalendarMonthCell => ({
+    key: `${monthKey}-blank-${index}`,
+    dateKey: null,
+    dayNumber: 0,
+    weekdayLabel: CALENDAR_WEEKDAY_LABELS[weekdayIndex],
+    monthLabel,
+    completed: false,
+    isToday: false,
+    isBlank: true,
+  });
+
+  const cells: CalendarMonthCell[] = Array.from({ length: leadingBlankCount }, (_, index) =>
+    blankCell(index, index),
+  );
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const dateKey = formatDateKeyParts({ year: parts.year, month: parts.month, day });
+    const weekdayIndex = (leadingBlankCount + day - 1) % 7;
+    cells.push({
+      key: dateKey,
+      dateKey,
+      dayNumber: day,
+      weekdayLabel: CALENDAR_WEEKDAY_LABELS[weekdayIndex],
+      monthLabel,
+      completed: completedDateKeys.has(dateKey),
+      isToday: dateKey === safeTodayKey,
+      isBlank: false,
+    });
+  }
+
+  const trailingBlankStartIndex = cells.length;
+  const trailingBlankCount = (7 - (trailingBlankStartIndex % 7)) % 7;
+  for (let index = 0; index < trailingBlankCount; index += 1) {
+    cells.push(blankCell(leadingBlankCount + daysInMonth + index, (trailingBlankStartIndex + index) % 7));
+  }
+
+  return cells;
+};
+
+export const buildProgressHistoryMonths = (
+  completedDates: readonly string[],
+  todayKey = formatDateKey(new Date()),
+  minimumMonthCount = 1,
+): CalendarMonth[] => {
+  const sanitizedCompletedDates = [...sanitizeCompletedDateKeys(completedDates).dateKeys].sort();
+  const safeTodayKey = getSafeDateKey(todayKey, formatDateKey(new Date()));
+  const oldestCompletedKey = sanitizedCompletedDates[0] ?? safeTodayKey;
+  const newestCompletedKey = sanitizedCompletedDates[sanitizedCompletedDates.length - 1] ?? safeTodayKey;
+  const latestDateKey =
+    (getDateKeyDistance(newestCompletedKey, safeTodayKey) ?? 0) >= 0 ? safeTodayKey : newestCompletedKey;
+  const safeTodayMonthKey = getMonthKeyFromDateKey(safeTodayKey) ?? getMonthKeyFromDateKey(FALLBACK_DATE_KEY)!;
+  let firstMonthKey = getMonthKeyFromDateKey(oldestCompletedKey) ?? safeTodayMonthKey;
+  const lastMonthKey = getMonthKeyFromDateKey(latestDateKey) ?? safeTodayMonthKey;
+  const requestedMinimumMonths = Math.max(1, Math.floor(minimumMonthCount));
+  const visibleMonthDistance = getMonthKeyDistance(firstMonthKey, lastMonthKey);
+
+  if (visibleMonthDistance === null || visibleMonthDistance < 0) {
+    firstMonthKey = safeTodayMonthKey;
+  } else if (visibleMonthDistance < requestedMinimumMonths - 1) {
+    firstMonthKey = addMonthsToMonthKey(lastMonthKey, -(requestedMinimumMonths - 1)) ?? firstMonthKey;
+  }
+
+  const cappedMonthDistance = getMonthKeyDistance(firstMonthKey, lastMonthKey);
+  if (cappedMonthDistance !== null && cappedMonthDistance >= MAX_PROGRESS_HISTORY_MONTHS) {
+    firstMonthKey = addMonthsToMonthKey(lastMonthKey, -(MAX_PROGRESS_HISTORY_MONTHS - 1)) ?? firstMonthKey;
+  }
+
+  const months: CalendarMonth[] = [];
+  let cursorKey = firstMonthKey;
+  let guard = 0;
+
+  while ((getMonthKeyDistance(cursorKey, lastMonthKey) ?? -1) >= 0 && guard < MAX_PROGRESS_HISTORY_MONTHS) {
+    const parts = parseMonthKeyParts(cursorKey);
+    if (!parts) {
+      break;
+    }
+
+    const cells = buildMonthCalendarCells(sanitizedCompletedDates, cursorKey, safeTodayKey);
+    months.push({
+      key: cursorKey,
+      monthKey: cursorKey,
+      label: `${FULL_MONTH_LABELS[parts.month - 1]} ${parts.year}`,
+      year: parts.year,
+      month: parts.month,
+      completedCount: cells.filter((cell) => cell.completed).length,
+      cells,
+    });
+    cursorKey = addMonthsToMonthKey(cursorKey, 1) ?? lastMonthKey;
+    guard += 1;
+  }
+
+  if (months.length === 0) {
+    const cells = buildMonthCalendarCells(sanitizedCompletedDates, safeTodayMonthKey, safeTodayKey);
+    const parts = parseMonthKeyParts(safeTodayMonthKey) ?? { year: 1970, month: 1 };
+    return [
+      {
+        key: safeTodayMonthKey,
+        monthKey: safeTodayMonthKey,
+        label: `${FULL_MONTH_LABELS[parts.month - 1]} ${parts.year}`,
+        year: parts.year,
+        month: parts.month,
+        completedCount: cells.filter((cell) => cell.completed).length,
+        cells,
+      },
+    ];
+  }
+
+  return months.reverse();
 };
 
 export const buildProgressHistoryWeeks = (

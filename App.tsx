@@ -24,7 +24,7 @@ import {
 } from "react-native";
 import {
   addDaysToDateKey,
-  buildProgressHistoryWeeks,
+  buildProgressHistoryMonths,
   buildWeekCalendarCells,
   CALENDAR_WEEKDAY_LABELS,
   dateKeyFromIso,
@@ -37,6 +37,7 @@ import {
   mergeCompletedDateKeys,
   sanitizeCompletedDateKeys,
   type CalendarCell,
+  type CalendarMonthCell,
 } from "./progressCalendar";
 
 type WorkoutDayName = "Push" | "Pull" | "Legs";
@@ -2145,8 +2146,8 @@ export default function App() {
     () => buildWeekCalendarCells(completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey),
     [completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey],
   );
-  const progressHistoryWeeks = useMemo(
-    () => buildProgressHistoryWeeks(completedProgressDateKeys, todayDateKey),
+  const progressHistoryMonths = useMemo(
+    () => buildProgressHistoryMonths(completedProgressDateKeys, todayDateKey),
     [completedProgressDateKeys, todayDateKey],
   );
   const progressHistoryCompletedCount = completedProgressDateKeys.length;
@@ -3674,6 +3675,35 @@ export default function App() {
     </View>
   );
 
+  const renderProgressMonthCell = (cell: CalendarMonthCell) => {
+    if (cell.isBlank) {
+      return (
+        <View
+          key={cell.key}
+          style={[styles.calendarCell, styles.progressMonthCalendarCell, styles.progressMonthBlankCell]}
+        />
+      );
+    }
+
+    return (
+      <View
+        accessible
+        accessibilityLabel={`${cell.weekdayLabel} ${cell.monthLabel} ${cell.dayNumber}${cell.completed ? ", completed" : ""}${cell.isToday ? ", today" : ""}`}
+        key={cell.key}
+        style={[
+          styles.calendarCell,
+          styles.progressMonthCalendarCell,
+          cell.completed && styles.calendarCellCompleted,
+          cell.isToday && styles.calendarCellToday,
+        ]}
+      >
+        <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
+          {cell.dayNumber}
+        </Text>
+      </View>
+    );
+  };
+
   const renderFullProgressHistory = () => (
     <ScrollView bounces contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
       <View style={styles.heroHeader}>
@@ -3698,21 +3728,34 @@ export default function App() {
         <View style={styles.historyHeader}>
           <View style={styles.historyHeaderCopy}>
             <Text style={styles.historyTitle}>Full Progress</Text>
-            <Text style={styles.historyCount}>All available weeks</Text>
+            <Text style={styles.historyCount}>
+              {progressHistoryMonths.length} available {progressHistoryMonths.length === 1 ? "month" : "months"}
+            </Text>
           </View>
         </View>
         {progressHistoryCompletedCount === 0 ? (
           <Text style={styles.noHistoryText}>No completed days yet.</Text>
         ) : null}
         <View style={styles.progressHistoryList}>
-          {progressHistoryWeeks.map((week) => (
-            <View key={week.key} style={styles.progressWeekRow}>
-              <View style={styles.progressWeekMeta}>
-                <Text style={styles.progressWeekRange}>{week.rangeLabel}</Text>
-                <Text style={styles.progressWeekCount}>{week.completedCount}/7</Text>
+          {progressHistoryMonths.map((month) => (
+            <View key={month.key} style={styles.progressMonthSection}>
+              <View style={styles.progressMonthHeader}>
+                <Text style={styles.progressMonthTitle}>{month.label}</Text>
+                <Text style={styles.progressMonthCount}>
+                  {month.completedCount} completed {month.completedCount === 1 ? "day" : "days"}
+                </Text>
               </View>
-              <View style={styles.progressWeekCells}>
-                {week.cells.map((cell) => renderCalendarCell(cell, true))}
+              <View style={styles.calendarWeekdayRow}>
+                {CALENDAR_WEEKDAY_LABELS.map((label) => (
+                  <Text key={`${month.key}-${label}`} style={styles.calendarWeekdayLabel}>{label}</Text>
+                ))}
+              </View>
+              <View style={styles.progressMonthGrid}>
+                {Array.from({ length: Math.ceil(month.cells.length / 7) }, (_, rowIndex) => (
+                  <View key={`${month.key}-row-${rowIndex}`} style={styles.progressMonthWeekRow}>
+                    {month.cells.slice(rowIndex * 7, rowIndex * 7 + 7).map(renderProgressMonthCell)}
+                  </View>
+                ))}
               </View>
             </View>
           ))}
@@ -5560,40 +5603,53 @@ function createStyles(theme: ThemeTokens) {
     fontWeight: "900",
   },
   progressHistoryList: {
-    gap: 10,
+    gap: 18,
     marginTop: 4,
   },
-  progressWeekRow: {
+  progressMonthSection: {
     alignItems: "stretch",
     borderBottomColor: theme.subtle,
     borderBottomWidth: 1,
-    gap: 8,
-    paddingBottom: 10,
+    gap: 10,
+    paddingBottom: 16,
   },
-  progressWeekMeta: {
+  progressMonthHeader: {
     alignItems: "center",
     flexDirection: "row",
+    gap: 12,
     justifyContent: "space-between",
   },
-  progressWeekRange: {
+  progressMonthTitle: {
     color: theme.text,
-    fontSize: 12,
+    flex: 1,
+    fontSize: 14,
     fontWeight: "900",
   },
-  progressWeekCount: {
+  progressMonthCount: {
     color: theme.mutedText,
     fontSize: 11,
     fontWeight: "800",
-    marginTop: 2,
+    textAlign: "right",
   },
-  progressWeekCells: {
+  progressMonthGrid: {
+    gap: 6,
+  },
+  progressMonthWeekRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
+    gap: 6,
   },
   progressCalendarCell: {
     flex: 0,
     height: 24,
     width: 24,
+  },
+  progressMonthCalendarCell: {
+    flex: 1,
+    height: 34,
+  },
+  progressMonthBlankCell: {
+    backgroundColor: "transparent",
+    borderColor: "transparent",
   },
   prRow: {
     alignItems: "center",

@@ -19,10 +19,13 @@ await writeFile(tempModulePath, transpiled.outputText);
 
 const {
   addDaysToDateKey,
+  buildMonthCalendarCells,
+  buildProgressHistoryMonths,
   buildProgressHistoryWeeks,
   buildWeekCalendarCells,
   getStartOfWeekDateKey,
   MAX_COMPLETED_DATE_KEYS,
+  MAX_PROGRESS_HISTORY_MONTHS,
   MAX_PROGRESS_HISTORY_WEEKS,
   sanitizeCompletedDateKeys,
 } = await import(pathToFileURL(tempModulePath).href);
@@ -45,6 +48,28 @@ assert.deepEqual(
   completedCells.filter((cell) => cell.completed).map((cell) => cell.key),
   ["2026-06-15", "2026-06-17"],
   "completed dates should render on their exact calendar dates",
+);
+
+const juneMonthCells = buildMonthCalendarCells(["2026-06-16"], "2026-06", "2026-06-16");
+assert.equal(juneMonthCells.length, 35, "June 2026 should render as five full calendar rows");
+assert.equal(juneMonthCells[0].key, "2026-06-01", "month calendar should align Monday starts without blanks");
+assert.equal(juneMonthCells[15].key, "2026-06-16", "month calendar should place completed dates on exact dates");
+assert.equal(juneMonthCells[15].completed, true, "month calendar should mark completed dates");
+assert.equal(juneMonthCells[15].isToday, true, "month calendar should mark today on the correct date");
+
+const mayMonthCells = buildMonthCalendarCells([], "2026-05", "2026-06-16");
+assert.deepEqual(
+  mayMonthCells.slice(0, 4).map((cell) => cell.isBlank),
+  [true, true, true, true],
+  "month calendar should add leading blanks before Friday month starts",
+);
+assert.equal(mayMonthCells[4].key, "2026-05-01", "first real day should follow leading blanks");
+
+const leapMonthCells = buildMonthCalendarCells([], "2024-02", "2024-02-10");
+assert.equal(
+  leapMonthCells.filter((cell) => !cell.isBlank).length,
+  29,
+  "leap-year February should render 29 real days",
 );
 
 const deduped = sanitizeCompletedDateKeys(["2026-06-16", "2026-06-16", "2026-06-17"]);
@@ -83,7 +108,45 @@ assert(
   "full history should preserve older completed progress dates",
 );
 
+const fullHistoryMonths = buildProgressHistoryMonths(["2026-04-01", "bad-date", "2026-04-01", "2026-06-16"], "2026-06-16");
+assert.deepEqual(
+  fullHistoryMonths.map((month) => month.monthKey),
+  ["2026-06", "2026-05", "2026-04"],
+  "full monthly history should include every available month from newest to oldest",
+);
+assert.equal(fullHistoryMonths[0].label, "June 2026", "monthly history should include the correct month and year label");
+assert(
+  fullHistoryMonths
+    .find((month) => month.monthKey === "2026-04")
+    ?.cells.some((cell) => cell.key === "2026-04-01" && cell.completed),
+  "monthly history should preserve older completed progress dates",
+);
+assert.equal(
+  fullHistoryMonths.find((month) => month.monthKey === "2026-04")?.completedCount,
+  1,
+  "monthly history should dedupe duplicate completed dates",
+);
+
+const emptyHistoryMonths = buildProgressHistoryMonths([], "2026-06-16");
+assert.deepEqual(
+  emptyHistoryMonths.map((month) => month.monthKey),
+  ["2026-06"],
+  "empty history should safely fall back to the current month",
+);
+assert.equal(emptyHistoryMonths[0].completedCount, 0, "empty history fallback should have no completed days");
+
 const longHistory = buildProgressHistoryWeeks(["1900-01-01"], "2026-06-16", 1);
 assert(longHistory.length <= MAX_PROGRESS_HISTORY_WEEKS, "full history rendering should have a safe week cap");
+
+const longMonthlyHistory = buildProgressHistoryMonths(["1900-01-01"], "2026-06-16", 1);
+assert(
+  longMonthlyHistory.length <= MAX_PROGRESS_HISTORY_MONTHS,
+  "full monthly history rendering should have a safe month cap",
+);
+assert.equal(
+  longMonthlyHistory[0].monthKey,
+  "2026-06",
+  "capped monthly history should preserve the newest visible month",
+);
 
 console.log("progressCalendar checks passed");
