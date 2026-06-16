@@ -22,6 +22,22 @@ import {
   View,
   type ViewStyle,
 } from "react-native";
+import {
+  addDaysToDateKey,
+  buildProgressHistoryWeeks,
+  buildWeekCalendarCells,
+  CALENDAR_WEEKDAY_LABELS,
+  dateKeyFromIso,
+  formatDateKey,
+  getCalendarWeekRangeLabel,
+  getDateKeyDistance,
+  getPreviousDateKey,
+  getStartOfWeekDateKey,
+  isValidDateKey,
+  mergeCompletedDateKeys,
+  sanitizeCompletedDateKeys,
+  type CalendarCell,
+} from "./progressCalendar";
 
 type WorkoutDayName = "Push" | "Pull" | "Legs";
 type WeightUnit = "lbs" | "kg";
@@ -161,12 +177,6 @@ type PersonalRecord = {
   unit: WeightUnit;
   normalizedWeight: number;
 };
-type CalendarCell = {
-  key: string;
-  dayNumber: number;
-  completed: boolean;
-  isToday: boolean;
-};
 type WeightHistoryItem = {
   week: WeekEntry;
   originalIndex: number;
@@ -213,7 +223,6 @@ const STREAK_WINDOW_DAYS = 7;
 const XP_PER_COMPLETED_SET = 10;
 const XP_PER_COMPLETED_WORKOUT_DAY = 50;
 const XP_PER_LEVEL = 500;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_MACRO_TARGETS: MacroDrafts = {
   protein: "180",
   carbs: "250",
@@ -610,33 +619,6 @@ const formatLoggedWeight = (value: number) => {
     : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 };
 
-const formatDateKey = (date: Date) =>
-  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-
-const dateKeyFromIso = (isoDate: string) => {
-  const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  return formatDateKey(date);
-};
-
-const dateKeyToTime = (dateKey: string) => {
-  const date = new Date(`${dateKey}T00:00:00`);
-  return Number.isNaN(date.getTime()) ? null : date.getTime();
-};
-
-const getDateKeyDistance = (fromDateKey: string, toDateKey: string) => {
-  const fromTime = dateKeyToTime(fromDateKey);
-  const toTime = dateKeyToTime(toDateKey);
-  if (fromTime === null || toTime === null) {
-    return null;
-  }
-
-  return Math.floor((toTime - fromTime) / MS_PER_DAY);
-};
-
 const toKilograms = (value: number, unit: WeightUnit) => (unit === "kg" ? value : value * 0.45359237);
 
 const convertWeight = (value: number, fromUnit: WeightUnit, toUnit: WeightUnit) => {
@@ -725,24 +707,6 @@ const calculateWeekVolume = (week: WeekEntry, extraDays: ExtraWorkoutDayEntry[] 
       weekTotal + calculateWorkoutDayVolume(week.days[dayName]),
     0,
   ) + extraDays.reduce((total, day) => total + calculateWorkoutDayVolume(day), 0);
-
-const buildLast28DayCalendarCells = (completedDates: CompletedDates): CalendarCell[] => {
-  const today = new Date();
-  const todayKey = formatDateKey(today);
-  const completedDateKeys = new Set(completedDates);
-
-  return Array.from({ length: 28 }, (_, index) => {
-    const date = new Date(today);
-    date.setDate(today.getDate() - index);
-    const dateKey = formatDateKey(date);
-    return {
-      key: dateKey,
-      dayNumber: date.getDate(),
-      completed: completedDateKeys.has(dateKey),
-      isToday: dateKey === todayKey,
-    };
-  });
-};
 
 const scanPersonalRecords = (weeks: WeekEntry[], extraDaysByWeek: ExtraWorkoutDaysByWeek) => {
   const records: Record<string, PersonalRecord> = {};
@@ -995,22 +959,16 @@ const normalizeCompletedSets = (value: unknown): CompletedSetsById => {
   }, {} as CompletedSetsById);
 };
 
-const isValidDateKey = (value: string) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T00:00:00`).getTime());
-
 const normalizeCompletedDates = (value: unknown): CompletedDates => {
-  if (!Array.isArray(value)) {
-    return [];
+  const result = sanitizeCompletedDateKeys(value);
+  if (result.invalidCount > 0 || result.duplicateCount > 0) {
+    reportStorageIssue("validate", COMPLETED_DATES_STORAGE_KEY, "Ignored invalid or duplicate completed date keys.", {
+      duplicateCount: result.duplicateCount,
+      invalidCount: result.invalidCount,
+    });
   }
 
-  return Array.from(
-    new Set(
-      value
-        .filter((dateKey): dateKey is string => typeof dateKey === "string")
-        .map((dateKey) => dateKey.trim())
-        .filter(isValidDateKey),
-    ),
-  );
+  return result.dateKeys;
 };
 
 const normalizeDailyCalorieTargets = (value: unknown): DailyCalorieTargets => {
@@ -1064,16 +1022,6 @@ const normalizeGamificationStats = (value: unknown): GamificationStats => {
   };
 };
 
-const getPreviousDateKey = (dateKey: string) => {
-  const date = new Date(`${dateKey}T00:00:00`);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  date.setDate(date.getDate() - 1);
-  return formatDateKey(date);
-};
-
 const findPreviousDailyCalorieTarget = (targets: DailyCalorieTargets, todayKey: string) => {
   const yesterdayKey = getPreviousDateKey(todayKey);
   if (yesterdayKey && targets[yesterdayKey]) {
@@ -1113,6 +1061,41 @@ const completedDatesFromCompletedSets = (completedSets: CompletedSetsById): Comp
       Object.values(completedSets)
         .map(dateKeyFromIso)
         .filter((dateKey): dateKey is string => Boolean(dateKey)),
+    ),
+  );
+
+const completedNutritionDatesFromCalories = (calories: DayCalories): CompletedDates => {
+  const target = safeNumber(calories.target);
+  if (target <= 0) {
+    return [];
+  }
+
+  const netCaloriesByDate = calories.logs.reduce((totals, log) => {
+    const dateKey = dateKeyFromIso(log.createdAt);
+    if (!dateKey) {
+      return totals;
+    }
+
+    const signedAmount = log.type === "add" ? log.amount : -log.amount;
+    totals.set(dateKey, (totals.get(dateKey) ?? 0) + signedAmount);
+    return totals;
+  }, new Map<string, number>());
+
+  return Array.from(netCaloriesByDate.entries())
+    .filter(([, netCalories]) => netCalories >= target)
+    .map(([dateKey]) => dateKey);
+};
+
+const completedNutritionDatesFromWeeks = (
+  weeks: WeekEntry[],
+  extraDaysByWeek: ExtraWorkoutDaysByWeek,
+): CompletedDates =>
+  mergeCompletedDateKeys(
+    weeks.flatMap((week) =>
+      DAY_NAMES.flatMap((dayName) => completedNutritionDatesFromCalories(week.days[dayName].calories)),
+    ),
+    Object.values(extraDaysByWeek).flatMap((extraDays) =>
+      extraDays.flatMap((extraDay) => completedNutritionDatesFromCalories(extraDay.calories)),
     ),
   );
 
@@ -1385,6 +1368,10 @@ export default function App() {
   const [quickCalorieDrafts, setQuickCalorieDrafts] = useState<QuickCalorieDrafts>(emptyQuickCalorieDrafts);
   const [completedSets, setCompletedSets] = useState<CompletedSetsById>({});
   const [completedDates, setCompletedDates] = useState<CompletedDates>([]);
+  const [selectedCalendarWeekStartKey, setSelectedCalendarWeekStartKey] = useState(
+    () => getStartOfWeekDateKey(formatDateKey(new Date())) ?? formatDateKey(new Date()),
+  );
+  const [isProgressHistoryOpen, setIsProgressHistoryOpen] = useState(false);
   const [dailyCalorieTargets, setDailyCalorieTargets] = useState<DailyCalorieTargets>({});
   const [restSeconds, setRestSeconds] = useState(0);
   const [plateModal, setPlateModal] = useState<PlateModalState>(null);
@@ -2117,10 +2104,35 @@ export default function App() {
     [extraWorkoutDays, weeks],
   );
 
-  const calendarCells = useMemo(
-    () => buildLast28DayCalendarCells(completedDates),
-    [completedDates],
+  const completedProgressDateKeys = useMemo(
+    () =>
+      mergeCompletedDateKeys(
+        completedDates,
+        completedDatesFromCompletedSets(completedSets),
+        completedNutritionDatesFromWeeks(weeks, extraWorkoutDays),
+      ),
+    [completedDates, completedSets, extraWorkoutDays, weeks],
   );
+
+  const currentCalendarWeekStartKey = useMemo(
+    () => getStartOfWeekDateKey(todayDateKey) ?? todayDateKey,
+    [todayDateKey],
+  );
+  const calendarWeekRange = useMemo(
+    () => getCalendarWeekRangeLabel(selectedCalendarWeekStartKey),
+    [selectedCalendarWeekStartKey],
+  );
+  const calendarCells = useMemo(
+    () => buildWeekCalendarCells(completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey),
+    [completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey],
+  );
+  const progressHistoryWeeks = useMemo(
+    () => buildProgressHistoryWeeks(completedProgressDateKeys, todayDateKey),
+    [completedProgressDateKeys, todayDateKey],
+  );
+  const progressHistoryCompletedCount = completedProgressDateKeys.length;
+  const canGoToNextCalendarWeek =
+    (getDateKeyDistance(selectedCalendarWeekStartKey, currentCalendarWeekStartKey) ?? 0) > 0;
 
   const workoutOrNutritionStreak = useMemo(() => {
     let streak = 0;
@@ -2715,6 +2727,24 @@ export default function App() {
 
     setMacroTargetMode(mode);
   }, [macroTargetMode, macroTargets]);
+
+  const showPreviousCalendarWeek = useCallback(() => {
+    setSelectedCalendarWeekStartKey((previousStartKey) =>
+      addDaysToDateKey(previousStartKey, -7) ?? previousStartKey,
+    );
+  }, []);
+
+  const showNextCalendarWeek = useCallback(() => {
+    setSelectedCalendarWeekStartKey((previousStartKey) => {
+      const nextStartKey = addDaysToDateKey(previousStartKey, 7) ?? previousStartKey;
+      const daysUntilCurrentWeek = getDateKeyDistance(nextStartKey, currentCalendarWeekStartKey);
+      return daysUntilCurrentWeek !== null && daysUntilCurrentWeek < 0 ? currentCalendarWeekStartKey : nextStartKey;
+    });
+  }, [currentCalendarWeekStartKey]);
+
+  const showCurrentCalendarWeek = useCallback(() => {
+    setSelectedCalendarWeekStartKey(currentCalendarWeekStartKey);
+  }, [currentCalendarWeekStartKey]);
 
   const renderStorageWarning = () =>
     storageError ? (
@@ -3607,103 +3637,207 @@ export default function App() {
     />
   );
 
-  const renderAnalyticsTab = () => (
+  const renderCalendarCell = (cell: CalendarCell, compact = false) => (
+    <View
+      accessible
+      accessibilityLabel={`${cell.weekdayLabel} ${cell.monthLabel} ${cell.dayNumber}${cell.completed ? ", completed" : ""}${cell.isToday ? ", today" : ""}`}
+      key={cell.key}
+      style={[
+        styles.calendarCell,
+        compact && styles.progressCalendarCell,
+        cell.completed && styles.calendarCellCompleted,
+        cell.isToday && styles.calendarCellToday,
+      ]}
+    >
+      <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
+        {cell.dayNumber}
+      </Text>
+    </View>
+  );
+
+  const renderFullProgressHistory = () => (
     <ScrollView bounces contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
       <View style={styles.heroHeader}>
-        <View>
-          <Text style={styles.screenTitle}>Stats</Text>
-          <Text style={styles.screenSubtitle}>Progressive overload at a glance.</Text>
+        <View style={styles.historyHeroCopy}>
+          <Text style={styles.screenTitle}>Progress History</Text>
+          <Text style={styles.screenSubtitle}>
+            {progressHistoryCompletedCount} completed {progressHistoryCompletedCount === 1 ? "day" : "days"}
+          </Text>
         </View>
-      </View>
-
-      <View style={styles.analyticsGrid}>
-        <View style={styles.analyticsCard}>
-          <Text style={styles.labelText}>Streak</Text>
-          <Text style={styles.analyticsNumber}>{workoutOrNutritionStreak}</Text>
-          <Text style={styles.sectionSubtitle}>completed workout or calorie-goal days</Text>
-        </View>
-        <View style={styles.analyticsCard}>
-          <Text style={styles.labelText}>Current Volume</Text>
-          <Text style={styles.analyticsNumber}>{Math.round(currentWeekVolume)}</Text>
-          <Text style={styles.sectionSubtitle}>sets x reps x load</Text>
-        </View>
+        <TouchableOpacity
+          accessibilityLabel="Back to normal stats"
+          accessibilityRole="button"
+          activeOpacity={0.8}
+          onPress={() => setIsProgressHistoryOpen(false)}
+          style={styles.historyOpenButton}
+        >
+          <Text style={styles.historyOpenButtonText}>Back</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.chartCard}>
         <View style={styles.historyHeader}>
-          <Text style={styles.historyTitle}>Consistency Calendar</Text>
-          <Text style={styles.historyCount}>Last 28 days</Text>
+          <View style={styles.historyHeaderCopy}>
+            <Text style={styles.historyTitle}>Full Progress</Text>
+            <Text style={styles.historyCount}>All available weeks</Text>
+          </View>
         </View>
-        <View style={styles.calendarGrid}>
-          {calendarCells.map((cell) => (
-            <View
-              key={cell.key}
-              style={[
-                styles.calendarCell,
-                cell.completed && styles.calendarCellCompleted,
-                cell.isToday && styles.calendarCellToday,
-              ]}
-            >
-              <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
-                {cell.dayNumber}
-              </Text>
+        {progressHistoryCompletedCount === 0 ? (
+          <Text style={styles.noHistoryText}>No completed days yet.</Text>
+        ) : null}
+        <View style={styles.progressHistoryList}>
+          {progressHistoryWeeks.map((week) => (
+            <View key={week.key} style={styles.progressWeekRow}>
+              <View style={styles.progressWeekMeta}>
+                <Text style={styles.progressWeekRange}>{week.rangeLabel}</Text>
+                <Text style={styles.progressWeekCount}>{week.completedCount}/7</Text>
+              </View>
+              <View style={styles.progressWeekCells}>
+                {week.cells.map((cell) => renderCalendarCell(cell, true))}
+              </View>
             </View>
           ))}
         </View>
       </View>
-
-      <View style={styles.chartCard}>
-        <View style={styles.historyHeader}>
-          <Text style={styles.historyTitle}>Personal Records</Text>
-          <Text style={styles.historyCount}>{personalRecords.length} lifts</Text>
-        </View>
-        {personalRecords.length === 0 ? (
-          <Text style={styles.noHistoryText}>No personal records yet.</Text>
-        ) : (
-          personalRecords.map((record) => (
-            <View key={`${record.exerciseName}-${record.weekNumber}`} style={styles.prRow}>
-              <View style={styles.prCopy}>
-                <Text style={styles.prExercise}>{record.exerciseName}</Text>
-                <Text style={styles.prMeta}>Week {record.weekNumber}</Text>
-              </View>
-              <Text style={styles.prValue}>
-                {record.weight}{record.unit} x {record.reps} reps
-              </Text>
-            </View>
-          ))
-        )}
-      </View>
-
-      <View style={styles.chartCard}>
-        <View style={styles.historyHeader}>
-          <Text style={styles.historyTitle}>Total Volume</Text>
-          <Text style={styles.historyCount}>by week</Text>
-        </View>
-        <View style={styles.volumeChart}>
-          {weeklyVolumeData.map((entry) => {
-            const height = Math.max(18, (entry.volume / maxWeeklyVolume) * 150);
-            return (
-              <View key={entry.weekNumber} style={styles.volumeBarColumn}>
-                <Text style={styles.volumeValue}>{Math.round(entry.volume)}</Text>
-                <View style={[styles.volumeBar, { height }]} />
-                <Text style={styles.volumeLabel}>W{entry.weekNumber}</Text>
-              </View>
-            );
-          })}
-        </View>
-      </View>
-
-      <View style={styles.chartCard}>
-        <Text style={styles.historyTitle}>Estimated 1RM Snapshot</Text>
-        {currentOneRepMaxSnapshot.map((exercise) => (
-          <View key={exercise.id} style={styles.oneRmRow}>
-            <Text style={styles.oneRmName}>{exercise.name}</Text>
-            <Text style={styles.oneRmValue}>{Math.round(exercise.oneRepMax) || "--"} {currentWeek.bodyweight.unit}</Text>
-          </View>
-        ))}
-      </View>
     </ScrollView>
   );
+
+  const renderAnalyticsTab = () => {
+    if (isProgressHistoryOpen) {
+      return renderFullProgressHistory();
+    }
+
+    return (
+      <ScrollView bounces contentContainerStyle={styles.screenContent} showsVerticalScrollIndicator={false}>
+        <View style={styles.heroHeader}>
+          <View>
+            <Text style={styles.screenTitle}>Stats</Text>
+            <Text style={styles.screenSubtitle}>Progressive overload at a glance.</Text>
+          </View>
+        </View>
+
+        <View style={styles.analyticsGrid}>
+          <View style={styles.analyticsCard}>
+            <Text style={styles.labelText}>Streak</Text>
+            <Text style={styles.analyticsNumber}>{workoutOrNutritionStreak}</Text>
+            <Text style={styles.sectionSubtitle}>completed workout or calorie-goal days</Text>
+          </View>
+          <View style={styles.analyticsCard}>
+            <Text style={styles.labelText}>Current Volume</Text>
+            <Text style={styles.analyticsNumber}>{Math.round(currentWeekVolume)}</Text>
+            <Text style={styles.sectionSubtitle}>sets x reps x load</Text>
+          </View>
+        </View>
+
+        <View style={styles.chartCard}>
+          <View style={styles.historyHeader}>
+            <View style={styles.historyHeaderCopy}>
+              <Text style={styles.historyTitle}>Consistency Calendar</Text>
+              <Text style={styles.historyCount}>{calendarWeekRange}</Text>
+            </View>
+            <TouchableOpacity
+              accessibilityLabel="Open full progress history"
+              accessibilityRole="button"
+              activeOpacity={0.8}
+              onPress={() => setIsProgressHistoryOpen(true)}
+              style={styles.historyOpenButton}
+            >
+              <Text style={styles.historyOpenButtonText}>Open</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.calendarWeekdayRow}>
+            {CALENDAR_WEEKDAY_LABELS.map((label) => (
+              <Text key={label} style={styles.calendarWeekdayLabel}>{label}</Text>
+            ))}
+          </View>
+          <View style={styles.calendarGrid}>
+            {calendarCells.map((cell) => renderCalendarCell(cell))}
+          </View>
+          <View style={styles.calendarNavRow}>
+            <TouchableOpacity
+              accessibilityLabel="Show previous consistency week"
+              accessibilityRole="button"
+              activeOpacity={0.8}
+              onPress={showPreviousCalendarWeek}
+              style={styles.calendarNavButton}
+            >
+              <Text style={styles.calendarNavButtonText}>Prev</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              accessibilityLabel="Show current consistency week"
+              accessibilityRole="button"
+              activeOpacity={0.8}
+              onPress={showCurrentCalendarWeek}
+              style={styles.calendarNavButton}
+            >
+              <Text style={styles.calendarNavButtonText}>This Week</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              accessibilityLabel="Show next consistency week"
+              accessibilityRole="button"
+              activeOpacity={0.8}
+              disabled={!canGoToNextCalendarWeek}
+              onPress={showNextCalendarWeek}
+              style={[styles.calendarNavButton, !canGoToNextCalendarWeek && styles.disabledButton]}
+            >
+              <Text style={styles.calendarNavButtonText}>Next</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.chartCard}>
+          <View style={styles.historyHeader}>
+            <Text style={styles.historyTitle}>Personal Records</Text>
+            <Text style={styles.historyCount}>{personalRecords.length} lifts</Text>
+          </View>
+          {personalRecords.length === 0 ? (
+            <Text style={styles.noHistoryText}>No personal records yet.</Text>
+          ) : (
+            personalRecords.map((record) => (
+              <View key={`${record.exerciseName}-${record.weekNumber}`} style={styles.prRow}>
+                <View style={styles.prCopy}>
+                  <Text style={styles.prExercise}>{record.exerciseName}</Text>
+                  <Text style={styles.prMeta}>Week {record.weekNumber}</Text>
+                </View>
+                <Text style={styles.prValue}>
+                  {record.weight}{record.unit} x {record.reps} reps
+                </Text>
+              </View>
+            ))
+          )}
+        </View>
+
+        <View style={styles.chartCard}>
+          <View style={styles.historyHeader}>
+            <Text style={styles.historyTitle}>Total Volume</Text>
+            <Text style={styles.historyCount}>by week</Text>
+          </View>
+          <View style={styles.volumeChart}>
+            {weeklyVolumeData.map((entry) => {
+              const height = Math.max(18, (entry.volume / maxWeeklyVolume) * 150);
+              return (
+                <View key={entry.weekNumber} style={styles.volumeBarColumn}>
+                  <Text style={styles.volumeValue}>{Math.round(entry.volume)}</Text>
+                  <View style={[styles.volumeBar, { height }]} />
+                  <Text style={styles.volumeLabel}>W{entry.weekNumber}</Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+
+        <View style={styles.chartCard}>
+          <Text style={styles.historyTitle}>Estimated 1RM Snapshot</Text>
+          {currentOneRepMaxSnapshot.map((exercise) => (
+            <View key={exercise.id} style={styles.oneRmRow}>
+              <Text style={styles.oneRmName}>{exercise.name}</Text>
+              <Text style={styles.oneRmValue}>{Math.round(exercise.oneRepMax) || "--"} {currentWeek.bodyweight.unit}</Text>
+            </View>
+          ))}
+        </View>
+      </ScrollView>
+    );
+  };
 
   const renderSegmentOption = <T extends string,>(
     value: T,
@@ -5265,6 +5399,30 @@ function createStyles(theme: ThemeTokens) {
     fontSize: 12,
     fontWeight: "800",
   },
+  historyHeaderCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  historyHeroCopy: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  historyOpenButton: {
+    alignItems: "center",
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 44,
+    minWidth: 74,
+    paddingHorizontal: 14,
+  },
+  historyOpenButtonText: {
+    color: theme.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
   noHistoryText: {
     color: theme.mutedText,
     fontSize: 13,
@@ -5320,8 +5478,20 @@ function createStyles(theme: ThemeTokens) {
   },
   calendarGrid: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 7,
+    gap: 6,
+  },
+  calendarWeekdayRow: {
+    flexDirection: "row",
+    gap: 6,
+    marginBottom: 8,
+  },
+  calendarWeekdayLabel: {
+    color: theme.mutedText,
+    flex: 1,
+    fontSize: 10,
+    fontWeight: "900",
+    textAlign: "center",
+    textTransform: "uppercase",
   },
   calendarCell: {
     alignItems: "center",
@@ -5329,9 +5499,9 @@ function createStyles(theme: ThemeTokens) {
     borderColor: "#161616",
     borderRadius: 6,
     borderWidth: 1,
+    flex: 1,
     height: 36,
     justifyContent: "center",
-    width: "12%",
   },
   calendarCellCompleted: {
     backgroundColor: accent,
@@ -5348,6 +5518,63 @@ function createStyles(theme: ThemeTokens) {
   },
   calendarCellTextCompleted: {
     color: "#FFFFFF",
+  },
+  calendarNavRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 12,
+  },
+  calendarNavButton: {
+    alignItems: "center",
+    backgroundColor: surface,
+    borderColor: border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: "center",
+    minHeight: 44,
+    paddingHorizontal: 8,
+  },
+  calendarNavButtonText: {
+    color: theme.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  progressHistoryList: {
+    gap: 10,
+    marginTop: 4,
+  },
+  progressWeekRow: {
+    alignItems: "stretch",
+    borderBottomColor: theme.subtle,
+    borderBottomWidth: 1,
+    gap: 8,
+    paddingBottom: 10,
+  },
+  progressWeekMeta: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  progressWeekRange: {
+    color: theme.text,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  progressWeekCount: {
+    color: theme.mutedText,
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 2,
+  },
+  progressWeekCells: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  progressCalendarCell: {
+    flex: 0,
+    height: 24,
+    width: 24,
   },
   prRow: {
     alignItems: "center",
