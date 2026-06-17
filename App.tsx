@@ -24,6 +24,7 @@ import {
 } from "react-native";
 import {
   addDaysToDateKey,
+  buildConsumedCaloriesByDate,
   buildProgressHistoryMonths,
   buildWeekCalendarCells,
   CALENDAR_WEEKDAY_LABELS,
@@ -37,6 +38,7 @@ import {
   mergeCompletedDateKeys,
   sanitizeCompletedDateKeys,
   type CalendarCell,
+  type CalendarCalorieLog,
   type CalendarMonthCell,
 } from "./progressCalendar";
 
@@ -169,7 +171,6 @@ type GamificationStats = {
 };
 type CompletedSetsById = Record<string, string>;
 type CompletedDates = string[];
-type CaloriesByDate = Record<string, number>;
 type DailyCalorieTargets = Record<string, string>;
 type PersonalRecord = {
   exerciseName: string;
@@ -1120,37 +1121,28 @@ const completedNutritionDatesFromWeeks = (
     ),
   );
 
-const addCalorieIntakeToTotals = (totals: CaloriesByDate, calories: DayCalories) => {
+const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalories) => {
   calories.logs.forEach((log) => {
-    if (log.type !== "add" || !Number.isFinite(log.amount) || log.amount <= 0) {
-      return;
+    if (!isStarterCalorieLog(log)) {
+      logs.push(log);
     }
-
-    const dateKey = dateKeyFromIso(log.createdAt);
-    if (!dateKey) {
-      return;
-    }
-
-    totals[dateKey] = (totals[dateKey] ?? 0) + log.amount;
   });
-
-  return totals;
 };
 
 const calorieIntakeByDateFromWeeks = (
   weeks: WeekEntry[],
   extraDaysByWeek: ExtraWorkoutDaysByWeek,
-): CaloriesByDate => {
-  const totals: CaloriesByDate = {};
+): Record<string, number> => {
+  const logs: CalendarCalorieLog[] = [];
 
   weeks.forEach((week) => {
-    DAY_NAMES.forEach((dayName) => addCalorieIntakeToTotals(totals, week.days[dayName].calories));
+    DAY_NAMES.forEach((dayName) => appendCalendarCalorieLogs(logs, week.days[dayName].calories));
   });
   Object.values(extraDaysByWeek).forEach((extraDays) => {
-    extraDays.forEach((extraDay) => addCalorieIntakeToTotals(totals, extraDay.calories));
+    extraDays.forEach((extraDay) => appendCalendarCalorieLogs(logs, extraDay.calories));
   });
 
-  return totals;
+  return buildConsumedCaloriesByDate(logs);
 };
 
 const formatCalendarCalories = (calories: number) => {
@@ -2191,14 +2183,8 @@ export default function App() {
     [selectedCalendarWeekStartKey],
   );
   const calendarCells = useMemo(
-    () =>
-      buildWeekCalendarCells(
-        completedProgressDateKeys,
-        selectedCalendarWeekStartKey,
-        todayDateKey,
-        calorieIntakeByDate,
-      ),
-    [calorieIntakeByDate, completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey],
+    () => buildWeekCalendarCells(completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey),
+    [completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey],
   );
   const progressHistoryMonths = useMemo(
     () => buildProgressHistoryMonths(completedProgressDateKeys, todayDateKey, 1, calorieIntakeByDate),
@@ -3711,35 +3697,23 @@ export default function App() {
     />
   );
 
-  const renderCalendarCell = (cell: CalendarCell, compact = false) => {
-    const calorieText = formatCalendarCalories(cell.calories);
-
-    return (
-      <View
-        accessible
-        accessibilityLabel={`${cell.weekdayLabel} ${cell.monthLabel} ${cell.dayNumber}${cell.completed ? ", completed" : ""}${cell.isToday ? ", today" : ""}${cell.calories > 0 ? `, ${Math.round(cell.calories)} calories eaten` : ""}`}
-        key={cell.key}
-        style={[
-          styles.calendarCell,
-          compact && styles.progressCalendarCell,
-          cell.completed && styles.calendarCellCompleted,
-          cell.isToday && styles.calendarCellToday,
-        ]}
-      >
-        <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
-          {cell.dayNumber}
-        </Text>
-        {calorieText ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.calendarCalorieText, cell.completed && styles.calendarCalorieTextCompleted]}
-          >
-            {calorieText}
-          </Text>
-        ) : null}
-      </View>
-    );
-  };
+  const renderCalendarCell = (cell: CalendarCell, compact = false) => (
+    <View
+      accessible
+      accessibilityLabel={`${cell.weekdayLabel} ${cell.monthLabel} ${cell.dayNumber}${cell.completed ? ", completed" : ""}${cell.isToday ? ", today" : ""}`}
+      key={cell.key}
+      style={[
+        styles.calendarCell,
+        compact && styles.progressCalendarCell,
+        cell.completed && styles.calendarCellCompleted,
+        cell.isToday && styles.calendarCellToday,
+      ]}
+    >
+      <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
+        {cell.dayNumber}
+      </Text>
+    </View>
+  );
 
   const renderProgressMonthCell = (cell: CalendarMonthCell) => {
     if (cell.isBlank) {
@@ -5638,11 +5612,8 @@ function createStyles(theme: ThemeTokens) {
     borderRadius: 6,
     borderWidth: 1,
     flex: 1,
-    gap: 1,
-    height: 44,
+    height: 36,
     justifyContent: "center",
-    paddingHorizontal: 2,
-    paddingVertical: 4,
   },
   calendarCellCompleted: {
     backgroundColor: accent,
@@ -5663,9 +5634,10 @@ function createStyles(theme: ThemeTokens) {
   },
   calendarCalorieText: {
     color: theme.mutedText,
-    fontSize: 8,
-    fontWeight: "800",
-    lineHeight: 10,
+    fontSize: 9,
+    fontVariant: ["tabular-nums"],
+    fontWeight: "900",
+    lineHeight: 11,
     textAlign: "center",
   },
   calendarCalorieTextCompleted: {
@@ -5730,12 +5702,15 @@ function createStyles(theme: ThemeTokens) {
   },
   progressCalendarCell: {
     flex: 0,
-    height: 34,
-    width: 30,
+    height: 24,
+    width: 24,
   },
   progressMonthCalendarCell: {
     flex: 1,
-    height: 44,
+    gap: 3,
+    height: 54,
+    paddingHorizontal: 1,
+    paddingVertical: 6,
   },
   progressMonthBlankCell: {
     backgroundColor: "transparent",

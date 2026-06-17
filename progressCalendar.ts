@@ -39,6 +39,13 @@ export type CalendarMonth = {
   cells: CalendarMonthCell[];
 };
 
+export type CalendarCalorieLog = {
+  id?: unknown;
+  type?: unknown;
+  amount?: unknown;
+  createdAt?: unknown;
+};
+
 type DateKeyParts = {
   year: number;
   month: number;
@@ -227,6 +234,39 @@ const buildCalendarCaloriesByDate = (caloriesByDate: Readonly<Record<string, num
 
     return totals;
   }, new Map<string, number>());
+
+export const buildConsumedCaloriesByDate = (logs: readonly CalendarCalorieLog[]) => {
+  const seenLogKeys = new Set<string>();
+  const totals: Record<string, number> = {};
+
+  logs.forEach((log) => {
+    if (log.type !== "add" || typeof log.amount !== "number" || !Number.isFinite(log.amount) || log.amount <= 0) {
+      return;
+    }
+
+    if (typeof log.createdAt !== "string") {
+      return;
+    }
+
+    const dateKey = dateKeyFromIso(log.createdAt);
+    if (!dateKey) {
+      return;
+    }
+
+    const logKey =
+      typeof log.id === "string" && log.id.trim()
+        ? `id:${log.id}`
+        : `signature:${log.type}|${log.amount}|${log.createdAt}`;
+    if (seenLogKeys.has(logKey)) {
+      return;
+    }
+
+    seenLogKeys.add(logKey);
+    totals[dateKey] = (totals[dateKey] ?? 0) + log.amount;
+  });
+
+  return totals;
+};
 
 export const sanitizeCompletedDateKeys = (value: unknown): DateKeySanitizationResult => {
   if (!Array.isArray(value)) {

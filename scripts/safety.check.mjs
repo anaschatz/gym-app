@@ -61,5 +61,30 @@ assert.equal(
 assert.match(calendarSource, /MAX_COMPLETED_DATE_KEYS/, "Completed date keys should have an explicit safety cap");
 assert.match(calendarSource, /MAX_PROGRESS_HISTORY_WEEKS/, "Progress history should have an explicit rendering cap");
 assert.match(calendarCheckSource, /truncatedCount/, "Calendar checks should cover capped completed-date inputs");
+assert.doesNotMatch(
+  appSource,
+  /buildWeekCalendarCells\([\s\S]{0,240}calorieIntakeByDate/,
+  "Compact Stats calendar should not receive calorie totals",
+);
+assert.doesNotMatch(
+  appSource,
+  /const renderCalendarCell[\s\S]*?formatCalendarCalories[\s\S]*?const renderProgressMonthCell/,
+  "Compact Stats calendar cells should not render calorie text",
+);
+assert.match(
+  appSource,
+  /buildProgressHistoryMonths\(completedProgressDateKeys,\s*todayDateKey,\s*1,\s*calorieIntakeByDate\)/,
+  "Full progress calendar should receive calorie totals",
+);
+assert.match(
+  appSource,
+  /fontVariant:\s*\["tabular-nums"\]/,
+  "Calendar calorie text should use stable tabular figures",
+);
+assert.match(
+  appSource,
+  /appendCalendarCalorieLogs[\s\S]*?!isStarterCalorieLog\(log\)[\s\S]*?buildConsumedCaloriesByDate\(logs\)/,
+  "Full progress calendar should ignore starter/demo calorie logs",
+);
 
 console.log("safety checks passed");

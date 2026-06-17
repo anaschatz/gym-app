@@ -19,6 +19,7 @@ await writeFile(tempModulePath, transpiled.outputText);
 
 const {
   addDaysToDateKey,
+  buildConsumedCaloriesByDate,
   buildMonthCalendarCells,
   buildProgressHistoryMonths,
   buildProgressHistoryWeeks,
@@ -48,6 +49,26 @@ assert.deepEqual(
   completedCells.filter((cell) => cell.completed).map((cell) => cell.key),
   ["2026-06-15", "2026-06-17"],
   "completed dates should render on their exact calendar dates",
+);
+assert.deepEqual(
+  completedCells.map((cell) => cell.calories),
+  [0, 0, 0, 0, 0, 0, 0],
+  "compact weekly calendar should have no calories unless explicitly supplied",
+);
+
+const consumedCaloriesByDate = buildConsumedCaloriesByDate([
+  { id: "meal-1", type: "add", amount: 2500, createdAt: "2026-06-17T10:00:00.000Z" },
+  { id: "meal-1", type: "add", amount: 2500, createdAt: "2026-06-17T10:00:00.000Z" },
+  { id: "extract-1", type: "extract", amount: 400, createdAt: "2026-06-17T11:00:00.000Z" },
+  { id: "meal-2", type: "add", amount: 3200, createdAt: "2026-06-18T10:00:00.000Z" },
+  { id: "bad-date", type: "add", amount: 9999, createdAt: "not-a-date" },
+  { id: "bad-amount", type: "add", amount: Number.NaN, createdAt: "2026-06-19T10:00:00.000Z" },
+  { id: "negative", type: "add", amount: -100, createdAt: "2026-06-19T10:00:00.000Z" },
+]);
+assert.deepEqual(
+  consumedCaloriesByDate,
+  { "2026-06-17": 2500, "2026-06-18": 3200 },
+  "consumed calories should count valid add logs once on their exact dates",
 );
 
 const calorieWeekCells = buildWeekCalendarCells(
