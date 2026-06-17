@@ -3725,12 +3725,12 @@ export default function App() {
       );
     }
 
-    const calorieText = formatCalendarCalories(cell.calories);
+    const calorieText = cell.completed ? formatCalendarCalories(cell.calories) : "";
 
     return (
       <View
         accessible
-        accessibilityLabel={`${cell.weekdayLabel} ${cell.monthLabel} ${cell.dayNumber}${cell.completed ? ", completed" : ""}${cell.isToday ? ", today" : ""}${cell.calories > 0 ? `, ${Math.round(cell.calories)} calories eaten` : ""}`}
+        accessibilityLabel={`${cell.weekdayLabel} ${cell.monthLabel} ${cell.dayNumber}${cell.completed ? ", completed" : ""}${cell.isToday ? ", today" : ""}${calorieText ? `, ${Math.round(cell.calories)} calories eaten` : ""}`}
         key={cell.key}
         style={[
           styles.calendarCell,

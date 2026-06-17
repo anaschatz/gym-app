@@ -86,5 +86,10 @@ assert.match(
   /appendCalendarCalorieLogs[\s\S]*?!isStarterCalorieLog\(log\)[\s\S]*?buildConsumedCaloriesByDate\(logs\)/,
   "Full progress calendar should ignore starter/demo calorie logs",
 );
+assert.match(
+  appSource,
+  /const calorieText = cell\.completed \? formatCalendarCalories\(cell\.calories\) : "";/,
+  "Full progress calendar should hide calories on non-completed days",
+);
 
 console.log("safety checks passed");
