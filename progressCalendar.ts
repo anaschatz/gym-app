@@ -12,6 +12,7 @@ export type CalendarCell = {
   monthLabel: string;
   completed: boolean;
   isToday: boolean;
+  calories: number;
 };
 
 export type CalendarWeek = {
@@ -218,6 +219,15 @@ const getDaysInMonth = (year: number, month: number) => new Date(Date.UTC(year, 
 const buildCompletedDateKeySet = (completedDates: readonly string[]) =>
   new Set(sanitizeCompletedDateKeys(completedDates).dateKeys);
 
+const buildCalendarCaloriesByDate = (caloriesByDate: Readonly<Record<string, number>> = {}) =>
+  Object.entries(caloriesByDate).reduce((totals, [dateKey, calories]) => {
+    if (isValidDateKey(dateKey) && Number.isFinite(calories) && calories > 0) {
+      totals.set(dateKey, Math.round(calories));
+    }
+
+    return totals;
+  }, new Map<string, number>());
+
 export const sanitizeCompletedDateKeys = (value: unknown): DateKeySanitizationResult => {
   if (!Array.isArray(value)) {
     return {
@@ -280,9 +290,11 @@ export const buildWeekCalendarCells = (
   completedDates: readonly string[],
   anchorDateKey: string,
   todayKey = formatDateKey(new Date()),
+  caloriesByDate: Readonly<Record<string, number>> = {},
 ): CalendarCell[] => {
   const weekStartKey = getSafeStartOfWeekDateKey(anchorDateKey, todayKey);
   const completedDateKeys = buildCompletedDateKeySet(completedDates);
+  const calendarCaloriesByDate = buildCalendarCaloriesByDate(caloriesByDate);
 
   return Array.from({ length: 7 }, (_, index) => {
     const dateKey = addDaysToDateKey(weekStartKey, index) ?? weekStartKey;
@@ -295,6 +307,7 @@ export const buildWeekCalendarCells = (
       monthLabel: parts ? MONTH_LABELS[parts.month - 1] : "",
       completed: completedDateKeys.has(dateKey),
       isToday: dateKey === todayKey,
+      calories: calendarCaloriesByDate.get(dateKey) ?? 0,
     };
   });
 };
@@ -303,6 +316,7 @@ export const buildMonthCalendarCells = (
   completedDates: readonly string[],
   monthKey: string,
   todayKey = formatDateKey(new Date()),
+  caloriesByDate: Readonly<Record<string, number>> = {},
 ): CalendarMonthCell[] => {
   const parts = parseMonthKeyParts(monthKey);
   if (!parts) {
@@ -310,6 +324,7 @@ export const buildMonthCalendarCells = (
   }
 
   const completedDateKeys = buildCompletedDateKeySet(completedDates);
+  const calendarCaloriesByDate = buildCalendarCaloriesByDate(caloriesByDate);
   const safeTodayKey = getSafeDateKey(todayKey, formatDateKey(new Date()));
   const firstDay = new Date(Date.UTC(parts.year, parts.month - 1, 1));
   const leadingBlankCount = (firstDay.getUTCDay() + 6) % 7;
@@ -323,6 +338,7 @@ export const buildMonthCalendarCells = (
     monthLabel,
     completed: false,
     isToday: false,
+    calories: 0,
     isBlank: true,
   });
 
@@ -341,6 +357,7 @@ export const buildMonthCalendarCells = (
       monthLabel,
       completed: completedDateKeys.has(dateKey),
       isToday: dateKey === safeTodayKey,
+      calories: calendarCaloriesByDate.get(dateKey) ?? 0,
       isBlank: false,
     });
   }
@@ -358,15 +375,20 @@ export const buildProgressHistoryMonths = (
   completedDates: readonly string[],
   todayKey = formatDateKey(new Date()),
   minimumMonthCount = 1,
+  caloriesByDate: Readonly<Record<string, number>> = {},
 ): CalendarMonth[] => {
   const sanitizedCompletedDates = [...sanitizeCompletedDateKeys(completedDates).dateKeys].sort();
+  const calendarCaloriesByDate = buildCalendarCaloriesByDate(caloriesByDate);
+  const availableProgressDateKeys = [
+    ...new Set([...sanitizedCompletedDates, ...calendarCaloriesByDate.keys()]),
+  ].sort();
   const safeTodayKey = getSafeDateKey(todayKey, formatDateKey(new Date()));
-  const oldestCompletedKey = sanitizedCompletedDates[0] ?? safeTodayKey;
-  const newestCompletedKey = sanitizedCompletedDates[sanitizedCompletedDates.length - 1] ?? safeTodayKey;
+  const oldestProgressKey = availableProgressDateKeys[0] ?? safeTodayKey;
+  const newestProgressKey = availableProgressDateKeys[availableProgressDateKeys.length - 1] ?? safeTodayKey;
   const latestDateKey =
-    (getDateKeyDistance(newestCompletedKey, safeTodayKey) ?? 0) >= 0 ? safeTodayKey : newestCompletedKey;
+    (getDateKeyDistance(newestProgressKey, safeTodayKey) ?? 0) >= 0 ? safeTodayKey : newestProgressKey;
   const safeTodayMonthKey = getMonthKeyFromDateKey(safeTodayKey) ?? getMonthKeyFromDateKey(FALLBACK_DATE_KEY)!;
-  let firstMonthKey = getMonthKeyFromDateKey(oldestCompletedKey) ?? safeTodayMonthKey;
+  let firstMonthKey = getMonthKeyFromDateKey(oldestProgressKey) ?? safeTodayMonthKey;
   const lastMonthKey = getMonthKeyFromDateKey(latestDateKey) ?? safeTodayMonthKey;
   const requestedMinimumMonths = Math.max(1, Math.floor(minimumMonthCount));
   const visibleMonthDistance = getMonthKeyDistance(firstMonthKey, lastMonthKey);
@@ -392,7 +414,7 @@ export const buildProgressHistoryMonths = (
       break;
     }
 
-    const cells = buildMonthCalendarCells(sanitizedCompletedDates, cursorKey, safeTodayKey);
+    const cells = buildMonthCalendarCells(sanitizedCompletedDates, cursorKey, safeTodayKey, caloriesByDate);
     months.push({
       key: cursorKey,
       monthKey: cursorKey,
@@ -407,7 +429,7 @@ export const buildProgressHistoryMonths = (
   }
 
   if (months.length === 0) {
-    const cells = buildMonthCalendarCells(sanitizedCompletedDates, safeTodayMonthKey, safeTodayKey);
+    const cells = buildMonthCalendarCells(sanitizedCompletedDates, safeTodayMonthKey, safeTodayKey, caloriesByDate);
     const parts = parseMonthKeyParts(safeTodayMonthKey) ?? { year: 1970, month: 1 };
     return [
       {

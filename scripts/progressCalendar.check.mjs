@@ -50,12 +50,32 @@ assert.deepEqual(
   "completed dates should render on their exact calendar dates",
 );
 
+const calorieWeekCells = buildWeekCalendarCells(
+  ["2026-06-17"],
+  "2026-06-17",
+  "2026-06-17",
+  { "2026-06-17": 1840.4, "2026-06-18": -20, "bad-key": 999 },
+);
+assert.equal(calorieWeekCells[2].calories, 1840, "weekly calendar should attach rounded calories to the exact date");
+assert.equal(calorieWeekCells[3].calories, 0, "weekly calendar should ignore non-positive calorie totals");
+assert.equal(
+  calorieWeekCells.some((cell) => cell.calories === 999),
+  false,
+  "weekly calendar should ignore invalid calorie date keys",
+);
+
 const juneMonthCells = buildMonthCalendarCells(["2026-06-16"], "2026-06", "2026-06-16");
 assert.equal(juneMonthCells.length, 35, "June 2026 should render as five full calendar rows");
 assert.equal(juneMonthCells[0].key, "2026-06-01", "month calendar should align Monday starts without blanks");
 assert.equal(juneMonthCells[15].key, "2026-06-16", "month calendar should place completed dates on exact dates");
 assert.equal(juneMonthCells[15].completed, true, "month calendar should mark completed dates");
 assert.equal(juneMonthCells[15].isToday, true, "month calendar should mark today on the correct date");
+assert.equal(
+  buildMonthCalendarCells([], "2026-06", "2026-06-16", { "2026-06-16": 2200 })
+    .find((cell) => cell.key === "2026-06-16")?.calories,
+  2200,
+  "month calendar should attach calories to the correct day",
+);
 
 const mayMonthCells = buildMonthCalendarCells([], "2026-05", "2026-06-16");
 assert.deepEqual(
@@ -125,6 +145,20 @@ assert.equal(
   fullHistoryMonths.find((month) => month.monthKey === "2026-04")?.completedCount,
   1,
   "monthly history should dedupe duplicate completed dates",
+);
+
+const calorieOnlyHistoryMonths = buildProgressHistoryMonths([], "2026-06-16", 1, { "2026-04-02": 2450 });
+assert.deepEqual(
+  calorieOnlyHistoryMonths.map((month) => month.monthKey),
+  ["2026-06", "2026-05", "2026-04"],
+  "monthly history should include months with calorie progress even without completed days",
+);
+assert.equal(
+  calorieOnlyHistoryMonths
+    .find((month) => month.monthKey === "2026-04")
+    ?.cells.find((cell) => cell.key === "2026-04-02")?.calories,
+  2450,
+  "monthly history should preserve calories on the exact progress date",
 );
 
 const emptyHistoryMonths = buildProgressHistoryMonths([], "2026-06-16");
