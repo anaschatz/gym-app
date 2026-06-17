@@ -88,8 +88,8 @@ assert.match(
 );
 assert.match(
   appSource,
-  /const calorieText = cell\.completed \? formatCalendarCalories\(cell\.calories\) : "";/,
-  "Full progress calendar should hide calories on non-completed days",
+  /const calorieText = cell\.completed \|\| cell\.isToday \? formatCalendarCalories\(cell\.calories\) : "";/,
+  "Full progress calendar should show calories only for completed days or today",
 );
 
 console.log("safety checks passed");

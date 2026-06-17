@@ -3725,7 +3725,7 @@ export default function App() {
       );
     }
 
-    const calorieText = cell.completed ? formatCalendarCalories(cell.calories) : "";
+    const calorieText = cell.completed || cell.isToday ? formatCalendarCalories(cell.calories) : "";
 
     return (
       <View
