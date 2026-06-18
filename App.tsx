@@ -89,9 +89,18 @@ type CalorieLog = {
   createdAt: string;
 };
 
+type CalorieLogSession = {
+  id: string;
+  startedAt: string;
+  endedAt: string;
+  logs: CalorieLog[];
+};
+
 type DayCalories = {
   target: string;
+  startedAt: string;
   logs: CalorieLog[];
+  history: CalorieLogSession[];
 };
 
 type WorkoutDayEntry = {
@@ -231,6 +240,7 @@ const MAX_EXTRA_DAYS_PER_WEEK = 365;
 const MAX_EXERCISES_PER_DAY = 100;
 const MAX_SETS_PER_EXERCISE = 100;
 const MAX_CALORIE_LOGS_PER_DAY = 5000;
+const MAX_CALORIE_SESSIONS_PER_DAY = 1000;
 const MAX_COMPLETED_SET_IDS = 50000;
 const MAX_DAILY_CALORIE_TARGETS = 10000;
 const MAX_WORKOUT_BONUS_CLAIMS = 50000;
@@ -455,9 +465,16 @@ const makeExercise = (name: string, sets: WorkoutSet[] = [makeSet()]): ExerciseE
   sets,
 });
 
-const makeCalories = (target = "2500", logs: CalorieLog[] = []): DayCalories => ({
+const makeCalories = (
+  target = "2500",
+  logs: CalorieLog[] = [],
+  startedAt = new Date().toISOString(),
+  history: CalorieLogSession[] = [],
+): DayCalories => ({
   target,
+  startedAt,
   logs,
+  history,
 });
 
 const hasMacroValues = (macros: MacroValues) =>
@@ -873,16 +890,68 @@ const normalizeCalorieLog = (value: unknown): CalorieLog | null => {
   };
 };
 
+const inferCalorieSessionStartedAt = (logs: CalorieLog[]) => {
+  if (logs.length === 0) {
+    return new Date().toISOString();
+  }
+
+  const validLogs = logs.filter((log) => isValidDateString(log.createdAt));
+  const dateKeys = new Set(
+    validLogs
+      .map((log) => dateKeyFromIso(log.createdAt))
+      .filter((dateKey): dateKey is string => Boolean(dateKey)),
+  );
+  if (dateKeys.size !== 1) {
+    return new Date().toISOString();
+  }
+
+  return validLogs.reduce((oldest, log) =>
+    new Date(log.createdAt).getTime() < new Date(oldest).getTime() ? log.createdAt : oldest,
+  validLogs[0]?.createdAt ?? new Date().toISOString());
+};
+
+const normalizeCalorieSession = (value: unknown): CalorieLogSession | null => {
+  const record = asRecord(value);
+  const rawLogs = Array.isArray(record?.logs) ? record.logs : [];
+  const logs = limitStoredItems(rawLogs, MAX_CALORIE_LOGS_PER_DAY)
+    .map(normalizeCalorieLog)
+    .filter((log): log is CalorieLog => Boolean(log))
+    .filter((log) => !isStarterCalorieLog(log));
+
+  if (logs.length === 0) {
+    return null;
+  }
+
+  return {
+    id: typeof record?.id === "string" ? record.id : makeId("calorie_session"),
+    startedAt:
+      typeof record?.startedAt === "string" && isValidDateString(record.startedAt)
+        ? record.startedAt
+        : inferCalorieSessionStartedAt(logs),
+    endedAt: normalizeStoredDate(record?.endedAt),
+    logs,
+  };
+};
+
 const normalizeCalories = (value: unknown): DayCalories => {
   const record = asRecord(value);
   const rawLogs = Array.isArray(record?.logs) ? record.logs : [];
+  const rawHistory = Array.isArray(record?.history) ? record.history : [];
+  const logs = limitStoredItems(rawLogs, MAX_CALORIE_LOGS_PER_DAY)
+    .map(normalizeCalorieLog)
+    .filter((log): log is CalorieLog => Boolean(log))
+    .filter((log) => !isStarterCalorieLog(log));
 
   return {
     target: typeof record?.target === "string" ? record.target : "2500",
-    logs: limitStoredItems(rawLogs, MAX_CALORIE_LOGS_PER_DAY)
-      .map(normalizeCalorieLog)
-      .filter((log): log is CalorieLog => Boolean(log))
-      .filter((log) => !isStarterCalorieLog(log)),
+    startedAt:
+      typeof record?.startedAt === "string" && isValidDateString(record.startedAt)
+        ? record.startedAt
+        : inferCalorieSessionStartedAt(logs),
+    logs,
+    history: limitStoredItems(rawHistory, MAX_CALORIE_SESSIONS_PER_DAY)
+      .map(normalizeCalorieSession)
+      .filter((session): session is CalorieLogSession => Boolean(session)),
   };
 };
 
@@ -1086,22 +1155,37 @@ const completedDatesFromCompletedSets = (completedSets: CompletedSetsById): Comp
     ),
   );
 
+const addSessionNetCaloriesByDate = (
+  totals: Map<string, number>,
+  logs: readonly CalorieLog[],
+  sessionDateKey: string | null,
+) => {
+  logs.forEach((log) => {
+    if (isStarterCalorieLog(log)) {
+      return;
+    }
+
+    const dateKey = sessionDateKey ?? dateKeyFromIso(log.createdAt);
+    if (!dateKey) {
+      return;
+    }
+
+    const signedAmount = log.type === "add" ? log.amount : -log.amount;
+    totals.set(dateKey, (totals.get(dateKey) ?? 0) + signedAmount);
+  });
+};
+
 const completedNutritionDatesFromCalories = (calories: DayCalories): CompletedDates => {
   const target = safeNumber(calories.target);
   if (target <= 0) {
     return [];
   }
 
-  const netCaloriesByDate = calories.logs.reduce((totals, log) => {
-    const dateKey = dateKeyFromIso(log.createdAt);
-    if (!dateKey) {
-      return totals;
-    }
-
-    const signedAmount = log.type === "add" ? log.amount : -log.amount;
-    totals.set(dateKey, (totals.get(dateKey) ?? 0) + signedAmount);
-    return totals;
-  }, new Map<string, number>());
+  const netCaloriesByDate = new Map<string, number>();
+  addSessionNetCaloriesByDate(netCaloriesByDate, calories.logs, dateKeyFromIso(calories.startedAt));
+  calories.history.forEach((session) => {
+    addSessionNetCaloriesByDate(netCaloriesByDate, session.logs, dateKeyFromIso(session.startedAt));
+  });
 
   return Array.from(netCaloriesByDate.entries())
     .filter(([, netCalories]) => netCalories >= target)
@@ -1121,11 +1205,22 @@ const completedNutritionDatesFromWeeks = (
     ),
   );
 
-const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalories) => {
-  calories.logs.forEach((log) => {
+const appendSessionCalendarCalorieLogs = (
+  logs: CalendarCalorieLog[],
+  calorieLogs: readonly CalorieLog[],
+  sessionDateKey: string | null,
+) => {
+  calorieLogs.forEach((log) => {
     if (!isStarterCalorieLog(log)) {
-      logs.push(log);
+      logs.push({ ...log, dateKey: sessionDateKey ?? undefined });
     }
+  });
+};
+
+const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalories) => {
+  appendSessionCalendarCalorieLogs(logs, calories.logs, dateKeyFromIso(calories.startedAt));
+  calories.history.forEach((session) => {
+    appendSessionCalendarCalorieLogs(logs, session.logs, dateKeyFromIso(session.startedAt));
   });
 };
 
@@ -2602,11 +2697,26 @@ export default function App() {
   }, [updateCurrentDay]);
 
   const resetNutritionForNewDay = useCallback(() => {
+    const resetAt = new Date().toISOString();
+
     updateCurrentDay((day) => ({
       ...day,
       calories: {
         ...day.calories,
+        startedAt: resetAt,
         logs: [],
+        history:
+          day.calories.logs.length > 0
+            ? [
+                {
+                  id: makeId("calorie_session"),
+                  startedAt: day.calories.startedAt,
+                  endedAt: resetAt,
+                  logs: day.calories.logs,
+                },
+                ...day.calories.history,
+              ].slice(0, MAX_CALORIE_SESSIONS_PER_DAY)
+            : day.calories.history,
       },
     }));
 
@@ -2621,7 +2731,7 @@ export default function App() {
       ...previousDrafts,
       [activeDay]: emptyFoodDraft(),
     }));
-    setNutritionResetNotice(`New day started - ${formatDateTime(new Date().toISOString())}`);
+    setNutritionResetNotice(`New day started - ${formatDateTime(resetAt)}`);
   }, [activeDay, updateCurrentDay]);
 
   const confirmResetNutrition = useCallback(() => {
@@ -3725,7 +3835,7 @@ export default function App() {
       );
     }
 
-    const calorieText = cell.completed || cell.isToday ? formatCalendarCalories(cell.calories) : "";
+    const calorieText = formatCalendarCalories(cell.calories);
 
     return (
       <View

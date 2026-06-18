@@ -83,13 +83,23 @@ assert.match(
 );
 assert.match(
   appSource,
-  /appendCalendarCalorieLogs[\s\S]*?!isStarterCalorieLog\(log\)[\s\S]*?buildConsumedCaloriesByDate\(logs\)/,
+  /appendSessionCalendarCalorieLogs[\s\S]*?!isStarterCalorieLog\(log\)[\s\S]*?dateKey: sessionDateKey[\s\S]*?buildConsumedCaloriesByDate\(logs\)/,
   "Full progress calendar should ignore starter/demo calorie logs",
 );
 assert.match(
   appSource,
-  /const calorieText = cell\.completed \|\| cell\.isToday \? formatCalendarCalories\(cell\.calories\) : "";/,
-  "Full progress calendar should show calories only for completed days or today",
+  /const calorieText = formatCalendarCalories\(cell\.calories\);/,
+  "Full progress calendar should render valid session calories for previous days",
+);
+assert.match(
+  appSource,
+  /type CalorieLogSession[\s\S]*startedAt: string;[\s\S]*endedAt: string;[\s\S]*logs: CalorieLog\[\];/,
+  "Nutrition reset history should keep explicit session boundaries",
+);
+assert.match(
+  appSource,
+  /resetNutritionForNewDay[\s\S]*startedAt: resetAt[\s\S]*startedAt: day\.calories\.startedAt[\s\S]*endedAt: resetAt[\s\S]*logs: day\.calories\.logs/,
+  "Nutrition reset should archive current logs before starting a new session",
 );
 
 console.log("safety checks passed");

@@ -44,6 +44,7 @@ export type CalendarCalorieLog = {
   type?: unknown;
   amount?: unknown;
   createdAt?: unknown;
+  dateKey?: unknown;
 };
 
 type DateKeyParts = {
@@ -248,7 +249,8 @@ export const buildConsumedCaloriesByDate = (logs: readonly CalendarCalorieLog[])
       return;
     }
 
-    const dateKey = dateKeyFromIso(log.createdAt);
+    const dateKey =
+      typeof log.dateKey === "string" && isValidDateKey(log.dateKey) ? log.dateKey : dateKeyFromIso(log.createdAt);
     if (!dateKey) {
       return;
     }
@@ -256,7 +258,7 @@ export const buildConsumedCaloriesByDate = (logs: readonly CalendarCalorieLog[])
     const logKey =
       typeof log.id === "string" && log.id.trim()
         ? `id:${log.id}`
-        : `signature:${log.type}|${log.amount}|${log.createdAt}`;
+        : `signature:${log.type}|${log.amount}|${log.createdAt}|${dateKey}`;
     if (seenLogKeys.has(logKey)) {
       return;
     }
