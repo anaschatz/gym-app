@@ -182,6 +182,10 @@ type GamificationStats = {
 type CompletedSetsById = Record<string, string>;
 type CompletedDates = string[];
 type DailyCalorieTargets = Record<string, string>;
+type HistoryResetMarker = {
+  dateKey: string;
+  createdAt: string;
+};
 type PersonalRecord = {
   exerciseName: string;
   weight: number;
@@ -203,6 +207,7 @@ const COMPLETED_SETS_STORAGE_KEY = "@iphone_gym_tracker/completed_sets_v1";
 const COMPLETED_DATES_STORAGE_KEY = "@iphone_gym_tracker/completed_dates_v1";
 const DAILY_CALORIE_TARGETS_STORAGE_KEY = "@iphone_gym_tracker/daily_calorie_targets_v1";
 const GAMIFICATION_STORAGE_KEY = "@iphone_gym_tracker/gamification_v1";
+const HISTORY_RESET_START_STORAGE_KEY = "@iphone_gym_tracker/history_reset_start_v1";
 const STORAGE_BACKUP_SUFFIX = ":backup_v1";
 type StoredJsonSource = "primary" | "backup";
 type StoredJsonResult<T> = {
@@ -1064,6 +1069,90 @@ const normalizeCompletedDates = (value: unknown): CompletedDates => {
   return result.dateKeys;
 };
 
+const normalizeHistoryResetMarker = (value: unknown): HistoryResetMarker | null => {
+  const record = asRecord(value);
+  const dateKey = record?.dateKey;
+  const createdAt = record?.createdAt;
+
+  if (typeof dateKey !== "string" || !isValidDateKey(dateKey)) {
+    return null;
+  }
+
+  return {
+    dateKey,
+    createdAt: typeof createdAt === "string" && isValidDateString(createdAt) ? createdAt : new Date().toISOString(),
+  };
+};
+
+const isDateKeyOnOrAfter = (dateKey: string | null, startDateKey: string) =>
+  Boolean(dateKey && isValidDateKey(dateKey) && dateKey >= startDateKey);
+
+const pruneCompletedSetsForHistoryStart = (completedSets: CompletedSetsById, startDateKey: string): CompletedSetsById =>
+  Object.entries(completedSets).reduce((nextCompletedSets, [setId, completedAt]) => {
+    if (isDateKeyOnOrAfter(dateKeyFromIso(completedAt), startDateKey)) {
+      nextCompletedSets[setId] = completedAt;
+    }
+
+    return nextCompletedSets;
+  }, {} as CompletedSetsById);
+
+const pruneCompletedDatesForHistoryStart = (completedDates: CompletedDates, startDateKey: string): CompletedDates =>
+  completedDates.filter((dateKey) => isDateKeyOnOrAfter(dateKey, startDateKey));
+
+const pruneCaloriesForHistoryStart = (
+  calories: DayCalories,
+  startDateKey: string,
+  resetAt: string,
+): DayCalories => {
+  const logs = calories.logs.filter((log) => isDateKeyOnOrAfter(dateKeyFromIso(log.createdAt), startDateKey));
+  const history = calories.history.filter((session) =>
+    isDateKeyOnOrAfter(dateKeyFromIso(session.startedAt), startDateKey),
+  );
+  const startedAt = isDateKeyOnOrAfter(dateKeyFromIso(calories.startedAt), startDateKey)
+    ? calories.startedAt
+    : resetAt;
+
+  return {
+    ...calories,
+    startedAt,
+    startedAtSource: "stored",
+    logs,
+    history,
+  };
+};
+
+const pruneWorkoutDayForHistoryStart = (
+  day: WorkoutDayEntry,
+  startDateKey: string,
+  resetAt: string,
+): WorkoutDayEntry => ({
+  ...day,
+  calories: pruneCaloriesForHistoryStart(day.calories, startDateKey, resetAt),
+});
+
+const pruneWeeksForHistoryStart = (weeks: WeekEntry[], startDateKey: string, resetAt: string): WeekEntry[] =>
+  weeks.map((week) => ({
+    ...week,
+    days: DAY_NAMES.reduce((days, dayName) => {
+      days[dayName] = pruneWorkoutDayForHistoryStart(week.days[dayName], startDateKey, resetAt);
+      return days;
+    }, {} as Record<WorkoutDayName, WorkoutDayEntry>),
+  }));
+
+const pruneExtraWorkoutDaysForHistoryStart = (
+  extraDaysByWeek: ExtraWorkoutDaysByWeek,
+  startDateKey: string,
+  resetAt: string,
+): ExtraWorkoutDaysByWeek =>
+  Object.entries(extraDaysByWeek).reduce((nextExtraDaysByWeek, [weekId, extraDays]) => {
+    nextExtraDaysByWeek[weekId] = extraDays.map((extraDay) => ({
+      ...extraDay,
+      calories: pruneCaloriesForHistoryStart(extraDay.calories, startDateKey, resetAt),
+    }));
+
+    return nextExtraDaysByWeek;
+  }, {} as ExtraWorkoutDaysByWeek);
+
 const normalizeDailyCalorieTargets = (value: unknown): DailyCalorieTargets => {
   const record = asRecord(value);
   if (!record) {
@@ -1644,27 +1733,69 @@ export default function App() {
       };
 
       try {
+        const historyResetAt = new Date().toISOString();
+        const historyResetDateKey = formatDateKey(new Date(historyResetAt));
+        const savedHistoryReset = await loadStoredJson(
+          HISTORY_RESET_START_STORAGE_KEY,
+          normalizeHistoryResetMarker,
+        );
+        noteStorageIssue(savedHistoryReset);
+        const shouldResetHistory = savedHistoryReset.value === null;
+        let resetWeeksToSave: WeekEntry[] | null = null;
+        let resetExtraWorkoutDaysToSave: ExtraWorkoutDaysByWeek | null = null;
+        let resetCompletedSetsToSave: CompletedSetsById | null = null;
+        let resetCompletedDatesToSave: CompletedDates | null = null;
+
         await loadStorageSlot(STORAGE_KEY, normalizeWeeks, (savedWeeks) => {
-          setWeeks(savedWeeks);
-          setActiveWeekIndex(savedWeeks.length - 1);
+          const nextWeeks = shouldResetHistory
+            ? pruneWeeksForHistoryStart(savedWeeks, historyResetDateKey, historyResetAt)
+            : savedWeeks;
+          if (shouldResetHistory) {
+            resetWeeksToSave = nextWeeks;
+          }
+          setWeeks(nextWeeks);
+          setActiveWeekIndex(nextWeeks.length - 1);
         });
 
-        await loadStorageSlot(EXTRA_DAYS_STORAGE_KEY, normalizeExtraWorkoutDaysByWeek, setExtraWorkoutDays);
+        await loadStorageSlot(EXTRA_DAYS_STORAGE_KEY, normalizeExtraWorkoutDaysByWeek, (savedExtraWorkoutDays) => {
+          const nextExtraWorkoutDays = shouldResetHistory
+            ? pruneExtraWorkoutDaysForHistoryStart(savedExtraWorkoutDays, historyResetDateKey, historyResetAt)
+            : savedExtraWorkoutDays;
+          if (shouldResetHistory) {
+            resetExtraWorkoutDaysToSave = nextExtraWorkoutDays;
+          }
+          setExtraWorkoutDays(nextExtraWorkoutDays);
+        });
 
         const savedCompletedSets = await loadStorageSlot(
           COMPLETED_SETS_STORAGE_KEY,
           normalizeCompletedSets,
           (normalizedCompletedSets) => {
-            completedSetsRef.current = normalizedCompletedSets;
-            setCompletedSets(normalizedCompletedSets);
+            const nextCompletedSets = shouldResetHistory
+              ? pruneCompletedSetsForHistoryStart(normalizedCompletedSets, historyResetDateKey)
+              : normalizedCompletedSets;
+            if (shouldResetHistory) {
+              resetCompletedSetsToSave = nextCompletedSets;
+            }
+            completedSetsRef.current = nextCompletedSets;
+            setCompletedSets(nextCompletedSets);
           },
         );
-        const normalizedCompletedSets = savedCompletedSets.value ?? {};
+        const normalizedCompletedSets = shouldResetHistory
+          ? pruneCompletedSetsForHistoryStart(savedCompletedSets.value ?? {}, historyResetDateKey)
+          : savedCompletedSets.value ?? {};
 
         const savedCompletedDates = await loadStoredJson(COMPLETED_DATES_STORAGE_KEY, normalizeCompletedDates);
         noteStorageIssue(savedCompletedDates);
         if (isMounted) {
-          setCompletedDates(savedCompletedDates.value ?? completedDatesFromCompletedSets(normalizedCompletedSets));
+          const nextCompletedDates = savedCompletedDates.value ?? completedDatesFromCompletedSets(normalizedCompletedSets);
+          const safeCompletedDates = shouldResetHistory
+            ? pruneCompletedDatesForHistoryStart(nextCompletedDates, historyResetDateKey)
+            : nextCompletedDates;
+          if (shouldResetHistory) {
+            resetCompletedDatesToSave = safeCompletedDates;
+          }
+          setCompletedDates(safeCompletedDates);
         }
 
         await loadStorageSlot(
@@ -1689,6 +1820,32 @@ export default function App() {
         if (savedTimerSettings.value !== null && !hasSavedAppSettings && isMounted) {
           setTimerSettings(savedTimerSettings.value);
           setTimerDurationDraft(String(savedTimerSettings.value.duration));
+        }
+
+        if (shouldResetHistory) {
+          const resetWrites = [
+            resetWeeksToSave === null ? null : saveStoredJson(STORAGE_KEY, resetWeeksToSave),
+            resetExtraWorkoutDaysToSave === null
+              ? null
+              : saveStoredJson(EXTRA_DAYS_STORAGE_KEY, resetExtraWorkoutDaysToSave),
+            resetCompletedSetsToSave === null
+              ? null
+              : saveStoredJson(COMPLETED_SETS_STORAGE_KEY, resetCompletedSetsToSave),
+            resetCompletedDatesToSave === null
+              ? null
+              : saveStoredJson(COMPLETED_DATES_STORAGE_KEY, resetCompletedDatesToSave),
+          ].filter((write): write is Promise<void> => write !== null);
+          await Promise.all(resetWrites).catch((error) => {
+            reportStorageIssue("save", "history_reset_pruned_data", error);
+            hadStorageIssue = true;
+          });
+          await saveStoredJson(HISTORY_RESET_START_STORAGE_KEY, {
+            createdAt: historyResetAt,
+            dateKey: historyResetDateKey,
+          }).catch((error) => {
+            reportStorageIssue("save", HISTORY_RESET_START_STORAGE_KEY, error);
+            hadStorageIssue = true;
+          });
         }
       } catch (error) {
         reportStorageIssue("load", "app_storage", error);

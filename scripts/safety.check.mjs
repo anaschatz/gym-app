@@ -111,5 +111,35 @@ assert.match(
   /resetNutritionForNewDay[\s\S]*logsToArchive = activeCalorieLogsForCalendar\(day\.calories,\s*todayDateKey\)[\s\S]*startedAtSource: "stored"[\s\S]*logs: logsToArchive/,
   "Nutrition reset should archive current logs before starting a new session",
 );
+assert.match(
+  appSource,
+  /HISTORY_RESET_START_STORAGE_KEY = "@iphone_gym_tracker\/history_reset_start_v1"/,
+  "History reset should use a durable marker so the wipe only runs once",
+);
+assert.match(
+  appSource,
+  /const shouldResetHistory = savedHistoryReset\.value === null;/,
+  "History reset should run only when the durable marker is missing",
+);
+assert.match(
+  appSource,
+  /pruneWeeksForHistoryStart\(savedWeeks,\s*historyResetDateKey,\s*historyResetAt\)/,
+  "History reset should prune saved workout nutrition history before today",
+);
+assert.match(
+  appSource,
+  /pruneCompletedSetsForHistoryStart\(normalizedCompletedSets,\s*historyResetDateKey\)/,
+  "History reset should prune old completed set history",
+);
+assert.match(
+  appSource,
+  /pruneCompletedDatesForHistoryStart\(nextCompletedDates,\s*historyResetDateKey\)/,
+  "History reset should prune old completed date history",
+);
+assert.match(
+  appSource,
+  /saveStoredJson\(STORAGE_KEY,\s*resetWeeksToSave\)[\s\S]*saveStoredJson\(HISTORY_RESET_START_STORAGE_KEY/,
+  "History reset should persist pruned data before writing the durable reset marker",
+);
 
 console.log("safety checks passed");
