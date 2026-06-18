@@ -99,6 +99,7 @@ type CalorieLogSession = {
 type DayCalories = {
   target: string;
   startedAt: string;
+  startedAtSource: "stored" | "inferred";
   logs: CalorieLog[];
   history: CalorieLogSession[];
 };
@@ -473,6 +474,7 @@ const makeCalories = (
 ): DayCalories => ({
   target,
   startedAt,
+  startedAtSource: "stored",
   logs,
   history,
 });
@@ -941,13 +943,13 @@ const normalizeCalories = (value: unknown): DayCalories => {
     .map(normalizeCalorieLog)
     .filter((log): log is CalorieLog => Boolean(log))
     .filter((log) => !isStarterCalorieLog(log));
+  const storedStartedAt =
+    typeof record?.startedAt === "string" && isValidDateString(record.startedAt) ? record.startedAt : null;
 
   return {
     target: typeof record?.target === "string" ? record.target : "2500",
-    startedAt:
-      typeof record?.startedAt === "string" && isValidDateString(record.startedAt)
-        ? record.startedAt
-        : inferCalorieSessionStartedAt(logs),
+    startedAt: storedStartedAt ?? inferCalorieSessionStartedAt(logs),
+    startedAtSource: storedStartedAt ? "stored" : "inferred",
     logs,
     history: limitStoredItems(rawHistory, MAX_CALORIE_SESSIONS_PER_DAY)
       .map(normalizeCalorieSession)
@@ -1155,6 +1157,11 @@ const completedDatesFromCompletedSets = (completedSets: CompletedSetsById): Comp
     ),
   );
 
+const activeCalorieLogsForCalendar = (calories: DayCalories, todayKey: string) =>
+  calories.startedAtSource === "stored"
+    ? calories.logs
+    : calories.logs.filter((log) => dateKeyFromIso(log.createdAt) === todayKey);
+
 const addSessionNetCaloriesByDate = (
   totals: Map<string, number>,
   logs: readonly CalorieLog[],
@@ -1175,14 +1182,18 @@ const addSessionNetCaloriesByDate = (
   });
 };
 
-const completedNutritionDatesFromCalories = (calories: DayCalories): CompletedDates => {
+const completedNutritionDatesFromCalories = (calories: DayCalories, todayKey: string): CompletedDates => {
   const target = safeNumber(calories.target);
   if (target <= 0) {
     return [];
   }
 
   const netCaloriesByDate = new Map<string, number>();
-  addSessionNetCaloriesByDate(netCaloriesByDate, calories.logs, dateKeyFromIso(calories.startedAt));
+  addSessionNetCaloriesByDate(
+    netCaloriesByDate,
+    activeCalorieLogsForCalendar(calories, todayKey),
+    calories.startedAtSource === "stored" ? dateKeyFromIso(calories.startedAt) : null,
+  );
   calories.history.forEach((session) => {
     addSessionNetCaloriesByDate(netCaloriesByDate, session.logs, dateKeyFromIso(session.startedAt));
   });
@@ -1195,13 +1206,14 @@ const completedNutritionDatesFromCalories = (calories: DayCalories): CompletedDa
 const completedNutritionDatesFromWeeks = (
   weeks: WeekEntry[],
   extraDaysByWeek: ExtraWorkoutDaysByWeek,
+  todayKey: string,
 ): CompletedDates =>
   mergeCompletedDateKeys(
     weeks.flatMap((week) =>
-      DAY_NAMES.flatMap((dayName) => completedNutritionDatesFromCalories(week.days[dayName].calories)),
+      DAY_NAMES.flatMap((dayName) => completedNutritionDatesFromCalories(week.days[dayName].calories, todayKey)),
     ),
     Object.values(extraDaysByWeek).flatMap((extraDays) =>
-      extraDays.flatMap((extraDay) => completedNutritionDatesFromCalories(extraDay.calories)),
+      extraDays.flatMap((extraDay) => completedNutritionDatesFromCalories(extraDay.calories, todayKey)),
     ),
   );
 
@@ -1217,8 +1229,12 @@ const appendSessionCalendarCalorieLogs = (
   });
 };
 
-const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalories) => {
-  appendSessionCalendarCalorieLogs(logs, calories.logs, dateKeyFromIso(calories.startedAt));
+const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalories, todayKey: string) => {
+  appendSessionCalendarCalorieLogs(
+    logs,
+    activeCalorieLogsForCalendar(calories, todayKey),
+    calories.startedAtSource === "stored" ? dateKeyFromIso(calories.startedAt) : null,
+  );
   calories.history.forEach((session) => {
     appendSessionCalendarCalorieLogs(logs, session.logs, dateKeyFromIso(session.startedAt));
   });
@@ -1227,14 +1243,15 @@ const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalo
 const calorieIntakeByDateFromWeeks = (
   weeks: WeekEntry[],
   extraDaysByWeek: ExtraWorkoutDaysByWeek,
+  todayKey: string,
 ): Record<string, number> => {
   const logs: CalendarCalorieLog[] = [];
 
   weeks.forEach((week) => {
-    DAY_NAMES.forEach((dayName) => appendCalendarCalorieLogs(logs, week.days[dayName].calories));
+    DAY_NAMES.forEach((dayName) => appendCalendarCalorieLogs(logs, week.days[dayName].calories, todayKey));
   });
   Object.values(extraDaysByWeek).forEach((extraDays) => {
-    extraDays.forEach((extraDay) => appendCalendarCalorieLogs(logs, extraDay.calories));
+    extraDays.forEach((extraDay) => appendCalendarCalorieLogs(logs, extraDay.calories, todayKey));
   });
 
   return buildConsumedCaloriesByDate(logs);
@@ -2259,14 +2276,14 @@ export default function App() {
       mergeCompletedDateKeys(
         completedDates,
         completedDatesFromCompletedSets(completedSets),
-        completedNutritionDatesFromWeeks(weeks, extraWorkoutDays),
+        completedNutritionDatesFromWeeks(weeks, extraWorkoutDays, todayDateKey),
       ),
-    [completedDates, completedSets, extraWorkoutDays, weeks],
+    [completedDates, completedSets, extraWorkoutDays, todayDateKey, weeks],
   );
 
   const calorieIntakeByDate = useMemo(
-    () => calorieIntakeByDateFromWeeks(weeks, extraWorkoutDays),
-    [extraWorkoutDays, weeks],
+    () => calorieIntakeByDateFromWeeks(weeks, extraWorkoutDays, todayDateKey),
+    [extraWorkoutDays, todayDateKey, weeks],
   );
 
   const currentCalendarWeekStartKey = useMemo(
@@ -2699,26 +2716,32 @@ export default function App() {
   const resetNutritionForNewDay = useCallback(() => {
     const resetAt = new Date().toISOString();
 
-    updateCurrentDay((day) => ({
-      ...day,
-      calories: {
-        ...day.calories,
-        startedAt: resetAt,
-        logs: [],
-        history:
-          day.calories.logs.length > 0
-            ? [
-                {
-                  id: makeId("calorie_session"),
-                  startedAt: day.calories.startedAt,
-                  endedAt: resetAt,
-                  logs: day.calories.logs,
-                },
-                ...day.calories.history,
-              ].slice(0, MAX_CALORIE_SESSIONS_PER_DAY)
-            : day.calories.history,
-      },
-    }));
+    updateCurrentDay((day) => {
+      const logsToArchive = activeCalorieLogsForCalendar(day.calories, todayDateKey);
+      const archiveStartedAt = day.calories.startedAtSource === "stored" ? day.calories.startedAt : resetAt;
+
+      return {
+        ...day,
+        calories: {
+          ...day.calories,
+          startedAt: resetAt,
+          startedAtSource: "stored",
+          logs: [],
+          history:
+            logsToArchive.length > 0
+              ? [
+                  {
+                    id: makeId("calorie_session"),
+                    startedAt: archiveStartedAt,
+                    endedAt: resetAt,
+                    logs: logsToArchive,
+                  },
+                  ...day.calories.history,
+                ].slice(0, MAX_CALORIE_SESSIONS_PER_DAY)
+              : day.calories.history,
+        },
+      };
+    });
 
     setQuickCalorieDrafts((previousDrafts) => ({
       ...previousDrafts,
@@ -2732,7 +2755,7 @@ export default function App() {
       [activeDay]: emptyFoodDraft(),
     }));
     setNutritionResetNotice(`New day started - ${formatDateTime(resetAt)}`);
-  }, [activeDay, updateCurrentDay]);
+  }, [activeDay, todayDateKey, updateCurrentDay]);
 
   const confirmResetNutrition = useCallback(() => {
     Alert.alert(

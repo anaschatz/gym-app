@@ -98,7 +98,17 @@ assert.match(
 );
 assert.match(
   appSource,
-  /resetNutritionForNewDay[\s\S]*startedAt: resetAt[\s\S]*startedAt: day\.calories\.startedAt[\s\S]*endedAt: resetAt[\s\S]*logs: day\.calories\.logs/,
+  /startedAtSource: "stored" \| "inferred";/,
+  "Nutrition calories should track whether startedAt came from stored session data",
+);
+assert.match(
+  appSource,
+  /const activeCalorieLogsForCalendar[\s\S]*startedAtSource === "stored"[\s\S]*dateKeyFromIso\(log\.createdAt\) === todayKey/,
+  "Legacy active calorie logs should only count on today's calendar date",
+);
+assert.match(
+  appSource,
+  /resetNutritionForNewDay[\s\S]*logsToArchive = activeCalorieLogsForCalendar\(day\.calories,\s*todayDateKey\)[\s\S]*startedAtSource: "stored"[\s\S]*logs: logsToArchive/,
   "Nutrition reset should archive current logs before starting a new session",
 );
 
