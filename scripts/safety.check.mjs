@@ -141,5 +141,25 @@ assert.match(
   /saveStoredJson\(STORAGE_KEY,\s*resetWeeksToSave\)[\s\S]*saveStoredJson\(HISTORY_RESET_START_STORAGE_KEY/,
   "History reset should persist pruned data before writing the durable reset marker",
 );
+assert.match(
+  appSource,
+  /const \[todayDateKey,\s*setTodayDateKey\] = useState\(getTodayDateKey\)/,
+  "Today calendar marker should be stateful instead of fixed at launch",
+);
+assert.match(
+  appSource,
+  /AppState\.addEventListener\("change"[\s\S]*refreshTodayDateKey/,
+  "Today calendar marker should refresh when the app returns active",
+);
+assert.match(
+  appSource,
+  /cell\.isToday && styles\.calendarCellToday/,
+  "Calendar cells should apply the today outline style",
+);
+assert.match(
+  appSource,
+  /cell\.isToday && styles\.calendarCellTextToday[\s\S]*cell\.isToday && styles\.calendarCalorieTextToday/,
+  "Full calendar today cells should keep day and calorie text readable",
+);
 
 console.log("safety checks passed");

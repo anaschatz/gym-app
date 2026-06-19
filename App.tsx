@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  AppState,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -251,6 +252,7 @@ const MAX_COMPLETED_SET_IDS = 50000;
 const MAX_DAILY_CALORIE_TARGETS = 10000;
 const MAX_WORKOUT_BONUS_CLAIMS = 50000;
 const MAX_REST_SECONDS = 24 * 60 * 60;
+const getTodayDateKey = () => formatDateKey(new Date());
 const DEFAULT_MACRO_TARGETS: MacroDrafts = {
   protein: "180",
   carbs: "250",
@@ -1624,8 +1626,9 @@ export default function App() {
   const [quickCalorieDrafts, setQuickCalorieDrafts] = useState<QuickCalorieDrafts>(emptyQuickCalorieDrafts);
   const [completedSets, setCompletedSets] = useState<CompletedSetsById>({});
   const [completedDates, setCompletedDates] = useState<CompletedDates>([]);
+  const [todayDateKey, setTodayDateKey] = useState(getTodayDateKey);
   const [selectedCalendarWeekStartKey, setSelectedCalendarWeekStartKey] = useState(
-    () => getStartOfWeekDateKey(formatDateKey(new Date())) ?? formatDateKey(new Date()),
+    () => getStartOfWeekDateKey(getTodayDateKey()) ?? getTodayDateKey(),
   );
   const [isProgressHistoryOpen, setIsProgressHistoryOpen] = useState(false);
   const [dailyCalorieTargets, setDailyCalorieTargets] = useState<DailyCalorieTargets>({});
@@ -1656,9 +1659,9 @@ export default function App() {
   const isProgrammaticTabScrollRef = useRef(false);
   const programmaticTabScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const workoutListRef = useRef<FlatList<ExerciseEntry>>(null);
+  const currentCalendarWeekStartKeyRef = useRef(getStartOfWeekDateKey(getTodayDateKey()) ?? getTodayDateKey());
   const { width: windowWidth } = useWindowDimensions();
   const pageWidth = Math.max(1, windowWidth);
-  const todayDateKey = useMemo(() => formatDateKey(new Date()), []);
 
   const currentWeek = weeks[activeWeekIndex] ?? weeks[0];
   const previousWeek = activeWeekIndex > 0 ? weeks[activeWeekIndex - 1] : undefined;
@@ -1709,6 +1712,28 @@ export default function App() {
   useEffect(() => {
     completedSetsRef.current = completedSets;
   }, [completedSets]);
+
+  useEffect(() => {
+    const refreshTodayDateKey = () => {
+      const nextTodayDateKey = getTodayDateKey();
+      setTodayDateKey((currentTodayDateKey) =>
+        currentTodayDateKey === nextTodayDateKey ? currentTodayDateKey : nextTodayDateKey,
+      );
+    };
+
+    refreshTodayDateKey();
+    const intervalId = setInterval(refreshTodayDateKey, 60 * 1000);
+    const appStateSubscription = AppState.addEventListener("change", (nextAppState) => {
+      if (nextAppState === "active") {
+        refreshTodayDateKey();
+      }
+    });
+
+    return () => {
+      clearInterval(intervalId);
+      appStateSubscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -2447,6 +2472,21 @@ export default function App() {
     () => getStartOfWeekDateKey(todayDateKey) ?? todayDateKey,
     [todayDateKey],
   );
+
+  useEffect(() => {
+    const previousCurrentCalendarWeekStartKey = currentCalendarWeekStartKeyRef.current;
+    if (previousCurrentCalendarWeekStartKey === currentCalendarWeekStartKey) {
+      return;
+    }
+
+    setSelectedCalendarWeekStartKey((selectedWeekStartKey) =>
+      selectedWeekStartKey === previousCurrentCalendarWeekStartKey
+        ? currentCalendarWeekStartKey
+        : selectedWeekStartKey,
+    );
+    currentCalendarWeekStartKeyRef.current = currentCalendarWeekStartKey;
+  }, [currentCalendarWeekStartKey]);
+
   const calendarWeekRange = useMemo(
     () => getCalendarWeekRangeLabel(selectedCalendarWeekStartKey),
     [selectedCalendarWeekStartKey],
@@ -3999,7 +4039,13 @@ export default function App() {
         cell.isToday && styles.calendarCellToday,
       ]}
     >
-      <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
+      <Text
+        style={[
+          styles.calendarCellText,
+          cell.completed && styles.calendarCellTextCompleted,
+          cell.isToday && styles.calendarCellTextToday,
+        ]}
+      >
         {cell.dayNumber}
       </Text>
     </View>
@@ -4029,13 +4075,23 @@ export default function App() {
           cell.isToday && styles.calendarCellToday,
         ]}
       >
-        <Text style={[styles.calendarCellText, cell.completed && styles.calendarCellTextCompleted]}>
+        <Text
+          style={[
+            styles.calendarCellText,
+            cell.completed && styles.calendarCellTextCompleted,
+            cell.isToday && styles.calendarCellTextToday,
+          ]}
+        >
           {cell.dayNumber}
         </Text>
         {calorieText ? (
           <Text
             numberOfLines={1}
-            style={[styles.calendarCalorieText, cell.completed && styles.calendarCalorieTextCompleted]}
+            style={[
+              styles.calendarCalorieText,
+              cell.completed && styles.calendarCalorieTextCompleted,
+              cell.isToday && styles.calendarCalorieTextToday,
+            ]}
           >
             {calorieText}
           </Text>
@@ -5910,8 +5966,12 @@ function createStyles(theme: ThemeTokens) {
     borderColor: accent,
   },
   calendarCellToday: {
-    borderColor: "#FFFFFF",
+    borderColor: "#F8FAFC",
     borderWidth: 2,
+    shadowColor: "#F8FAFC",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
   },
   calendarCellText: {
     color: theme.mutedText,
@@ -5920,6 +5980,9 @@ function createStyles(theme: ThemeTokens) {
     lineHeight: 12,
   },
   calendarCellTextCompleted: {
+    color: "#FFFFFF",
+  },
+  calendarCellTextToday: {
     color: "#FFFFFF",
   },
   calendarCalorieText: {
@@ -5931,6 +5994,9 @@ function createStyles(theme: ThemeTokens) {
     textAlign: "center",
   },
   calendarCalorieTextCompleted: {
+    color: "#FFFFFF",
+  },
+  calendarCalorieTextToday: {
     color: "#FFFFFF",
   },
   calendarNavRow: {
