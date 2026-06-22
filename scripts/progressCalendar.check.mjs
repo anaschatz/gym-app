@@ -24,6 +24,7 @@ const {
   buildProgressHistoryMonths,
   buildProgressHistoryWeeks,
   buildWeekCalendarCells,
+  countDateKeysInWeek,
   getStartOfWeekDateKey,
   MAX_COMPLETED_DATE_KEYS,
   MAX_PROGRESS_HISTORY_MONTHS,
@@ -134,6 +135,17 @@ const excessiveDates = Array.from({ length: MAX_COMPLETED_DATE_KEYS + 2 }, (_, i
 const truncated = sanitizeCompletedDateKeys(excessiveDates);
 assert.equal(truncated.dateKeys.length, MAX_COMPLETED_DATE_KEYS, "completed date keys should have a safe cap");
 assert(truncated.truncatedCount > 0, "truncated completed date keys should be reported");
+
+assert.equal(
+  countDateKeysInWeek(["2026-06-15", "2026-06-15", "2026-06-17", "2026-06-22", "bad-date"], "2026-06-17"),
+  2,
+  "weekly workout count should count unique valid workout dates in the current Monday-Sunday week",
+);
+assert.equal(
+  countDateKeysInWeek(["2026-06-15", "2026-06-17"], "2026-06-22"),
+  0,
+  "weekly workout count should reset when the next calendar week starts",
+);
 
 const fullHistoryWeeks = buildProgressHistoryWeeks(["2026-04-01", "2026-06-16"], "2026-06-16", 1);
 assert.equal(fullHistoryWeeks[0].startKey, "2026-06-15", "full history should show the newest week first");

@@ -323,6 +323,19 @@ export const sanitizeCompletedDateKeys = (value: unknown): DateKeySanitizationRe
 export const mergeCompletedDateKeys = (...dateKeyGroups: Array<readonly string[]>) =>
   sanitizeCompletedDateKeys(dateKeyGroups.flat()).dateKeys;
 
+export const countDateKeysInWeek = (dateKeys: readonly string[], weekStartKey: string) => {
+  const safeWeekStartKey = getStartOfWeekDateKey(getSafeDateKey(weekStartKey, FALLBACK_DATE_KEY));
+  if (!safeWeekStartKey) {
+    return 0;
+  }
+
+  const uniqueDateKeys = new Set(sanitizeCompletedDateKeys(dateKeys).dateKeys);
+  return Array.from(uniqueDateKeys).filter((dateKey) => {
+    const distance = getDateKeyDistance(safeWeekStartKey, dateKey);
+    return distance !== null && distance >= 0 && distance < 7;
+  }).length;
+};
+
 export const getCalendarWeekRangeLabel = (weekStartKey: string) => {
   const endKey = addDaysToDateKey(weekStartKey, 6) ?? weekStartKey;
   return `${formatShortDateLabel(weekStartKey)} - ${formatShortDateLabel(endKey)}`;

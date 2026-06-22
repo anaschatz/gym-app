@@ -29,6 +29,7 @@ import {
   buildProgressHistoryMonths,
   buildWeekCalendarCells,
   CALENDAR_WEEKDAY_LABELS,
+  countDateKeysInWeek,
   dateKeyFromIso,
   formatDateKey,
   getCalendarWeekRangeLabel,
@@ -36,7 +37,6 @@ import {
   getPreviousDateKey,
   getStartOfWeekDateKey,
   isValidDateKey,
-  mergeCompletedDateKeys,
   sanitizeCompletedDateKeys,
   type CalendarCell,
   type CalendarCalorieLog,
@@ -1253,61 +1253,6 @@ const activeCalorieLogsForCalendar = (calories: DayCalories, todayKey: string) =
     ? calories.logs
     : calories.logs.filter((log) => dateKeyFromIso(log.createdAt) === todayKey);
 
-const addSessionNetCaloriesByDate = (
-  totals: Map<string, number>,
-  logs: readonly CalorieLog[],
-  sessionDateKey: string | null,
-) => {
-  logs.forEach((log) => {
-    if (isStarterCalorieLog(log)) {
-      return;
-    }
-
-    const dateKey = sessionDateKey ?? dateKeyFromIso(log.createdAt);
-    if (!dateKey) {
-      return;
-    }
-
-    const signedAmount = log.type === "add" ? log.amount : -log.amount;
-    totals.set(dateKey, (totals.get(dateKey) ?? 0) + signedAmount);
-  });
-};
-
-const completedNutritionDatesFromCalories = (calories: DayCalories, todayKey: string): CompletedDates => {
-  const target = safeNumber(calories.target);
-  if (target <= 0) {
-    return [];
-  }
-
-  const netCaloriesByDate = new Map<string, number>();
-  addSessionNetCaloriesByDate(
-    netCaloriesByDate,
-    activeCalorieLogsForCalendar(calories, todayKey),
-    calories.startedAtSource === "stored" ? dateKeyFromIso(calories.startedAt) : null,
-  );
-  calories.history.forEach((session) => {
-    addSessionNetCaloriesByDate(netCaloriesByDate, session.logs, dateKeyFromIso(session.startedAt));
-  });
-
-  return Array.from(netCaloriesByDate.entries())
-    .filter(([, netCalories]) => netCalories >= target)
-    .map(([dateKey]) => dateKey);
-};
-
-const completedNutritionDatesFromWeeks = (
-  weeks: WeekEntry[],
-  extraDaysByWeek: ExtraWorkoutDaysByWeek,
-  todayKey: string,
-): CompletedDates =>
-  mergeCompletedDateKeys(
-    weeks.flatMap((week) =>
-      DAY_NAMES.flatMap((dayName) => completedNutritionDatesFromCalories(week.days[dayName].calories, todayKey)),
-    ),
-    Object.values(extraDaysByWeek).flatMap((extraDays) =>
-      extraDays.flatMap((extraDay) => completedNutritionDatesFromCalories(extraDay.calories, todayKey)),
-    ),
-  );
-
 const appendSessionCalendarCalorieLogs = (
   logs: CalendarCalorieLog[],
   calorieLogs: readonly CalorieLog[],
@@ -2453,14 +2398,9 @@ export default function App() {
     [extraWorkoutDays, weeks],
   );
 
-  const completedProgressDateKeys = useMemo(
-    () =>
-      mergeCompletedDateKeys(
-        completedDates,
-        completedDatesFromCompletedSets(completedSets),
-        completedNutritionDatesFromWeeks(weeks, extraWorkoutDays, todayDateKey),
-      ),
-    [completedDates, completedSets, extraWorkoutDays, todayDateKey, weeks],
+  const workoutProgressDateKeys = useMemo(
+    () => completedDatesFromCompletedSets(completedSets),
+    [completedSets],
   );
 
   const calorieIntakeByDate = useMemo(
@@ -2471,6 +2411,11 @@ export default function App() {
   const currentCalendarWeekStartKey = useMemo(
     () => getStartOfWeekDateKey(todayDateKey) ?? todayDateKey,
     [todayDateKey],
+  );
+
+  const currentWeekWorkoutCount = useMemo(
+    () => countDateKeysInWeek(workoutProgressDateKeys, currentCalendarWeekStartKey),
+    [currentCalendarWeekStartKey, workoutProgressDateKeys],
   );
 
   useEffect(() => {
@@ -2492,55 +2437,16 @@ export default function App() {
     [selectedCalendarWeekStartKey],
   );
   const calendarCells = useMemo(
-    () => buildWeekCalendarCells(completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey),
-    [completedProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey],
+    () => buildWeekCalendarCells(workoutProgressDateKeys, selectedCalendarWeekStartKey, todayDateKey),
+    [selectedCalendarWeekStartKey, todayDateKey, workoutProgressDateKeys],
   );
   const progressHistoryMonths = useMemo(
-    () => buildProgressHistoryMonths(completedProgressDateKeys, todayDateKey, 1, calorieIntakeByDate),
-    [calorieIntakeByDate, completedProgressDateKeys, todayDateKey],
+    () => buildProgressHistoryMonths(workoutProgressDateKeys, todayDateKey, 1, calorieIntakeByDate),
+    [calorieIntakeByDate, todayDateKey, workoutProgressDateKeys],
   );
-  const progressHistoryCompletedCount = completedProgressDateKeys.length;
+  const progressHistoryCompletedCount = workoutProgressDateKeys.length;
   const canGoToNextCalendarWeek =
     (getDateKeyDistance(selectedCalendarWeekStartKey, currentCalendarWeekStartKey) ?? 0) > 0;
-
-  const workoutOrNutritionStreak = useMemo(() => {
-    let streak = 0;
-
-    for (let weekIndex = weeks.length - 1; weekIndex >= 0; weekIndex -= 1) {
-      const hasExtraWorkoutDays = (extraWorkoutDays[weeks[weekIndex].id] ?? [])
-        .map((extraDay) =>
-          extraDay.exercises.some((exercise) =>
-            exercise.sets.some((set) => safeNumber(set.weight) > 0 && safeNumber(set.reps) > 0),
-          ),
-        )
-        .reverse();
-
-      for (const hasExtraWorkout of hasExtraWorkoutDays) {
-        if (hasExtraWorkout) {
-          streak += 1;
-        } else if (streak > 0) {
-          return streak;
-        }
-      }
-
-      for (let dayIndex = DAY_NAMES.length - 1; dayIndex >= 0; dayIndex -= 1) {
-        const day = weeks[weekIndex].days[DAY_NAMES[dayIndex]];
-        const hasWorkout = day.exercises.some((exercise) =>
-          exercise.sets.some((set) => safeNumber(set.weight) > 0 && safeNumber(set.reps) > 0),
-        );
-        const dayCalories = calculateDayCalories(day);
-        const hitCalories = dayCalories.target > 0 && dayCalories.netCalories >= dayCalories.target;
-
-        if (hasWorkout || hitCalories) {
-          streak += 1;
-        } else if (streak > 0) {
-          return streak;
-        }
-      }
-    }
-
-    return streak;
-  }, [extraWorkoutDays, weeks]);
 
   const weeklyAverageWeight = useMemo(() => {
     const weights = weeks.map((week) => safeNumber(week.bodyweight.value)).filter((value) => value > 0);
@@ -3388,7 +3294,7 @@ export default function App() {
         <View style={styles.streakHeaderRow}>
           <View style={styles.streakTitleBlock}>
             <Text style={styles.streakIcon}>🔥</Text>
-            <Text style={styles.streakTitle}>{gamificationStats.streakCount} Week Streak</Text>
+            <Text style={styles.streakTitle}>{currentWeekWorkoutCount} Gym Visits</Text>
           </View>
           <View style={styles.levelPill}>
             <Text style={styles.levelPillText}>Level {gymLevel}</Text>
@@ -3403,7 +3309,7 @@ export default function App() {
         </View>
       </View>
     ),
-    [currentLevelXP, gamificationStats.streakCount, gamificationStats.totalXP, gymLevel, levelProgress, styles],
+    [currentLevelXP, currentWeekWorkoutCount, gamificationStats.totalXP, gymLevel, levelProgress, styles],
   );
 
   const renderRecommendedExercises = useCallback(() => {
@@ -4176,9 +4082,9 @@ export default function App() {
 
         <View style={styles.analyticsGrid}>
           <View style={styles.analyticsCard}>
-            <Text style={styles.labelText}>Streak</Text>
-            <Text style={styles.analyticsNumber}>{workoutOrNutritionStreak}</Text>
-            <Text style={styles.sectionSubtitle}>completed workout or calorie-goal days</Text>
+            <Text style={styles.labelText}>This Week</Text>
+            <Text style={styles.analyticsNumber}>{currentWeekWorkoutCount}</Text>
+            <Text style={styles.sectionSubtitle}>gym visits this week</Text>
           </View>
           <View style={styles.analyticsCard}>
             <Text style={styles.labelText}>Current Volume</Text>

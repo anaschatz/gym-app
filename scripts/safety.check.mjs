@@ -73,8 +73,28 @@ assert.doesNotMatch(
 );
 assert.match(
   appSource,
-  /buildProgressHistoryMonths\(completedProgressDateKeys,\s*todayDateKey,\s*1,\s*calorieIntakeByDate\)/,
+  /buildProgressHistoryMonths\(workoutProgressDateKeys,\s*todayDateKey,\s*1,\s*calorieIntakeByDate\)/,
   "Full progress calendar should receive calorie totals",
+);
+assert.match(
+  appSource,
+  /const workoutProgressDateKeys = useMemo\([\s\S]*?completedDatesFromCompletedSets\(completedSets\)[\s\S]*?\[completedSets\]/,
+  "Blue progress completion should come from completed workout sets only",
+);
+assert.doesNotMatch(
+  appSource,
+  /completedNutritionDatesFrom/,
+  "Nutrition calorie goals should not mark progress calendar days as completed",
+);
+assert.match(
+  appSource,
+  /countDateKeysInWeek\(workoutProgressDateKeys,\s*currentCalendarWeekStartKey\)/,
+  "Weekly gym count should reset from the current calendar week",
+);
+assert.match(
+  appSource,
+  /gym visits this week/,
+  "Stats copy should describe weekly gym visits instead of calorie-goal streaks",
 );
 assert.match(
   appSource,
