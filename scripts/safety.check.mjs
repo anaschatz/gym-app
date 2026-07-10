@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 const appSource = await readFile("App.tsx", "utf8");
 const calendarSource = await readFile("progressCalendar.ts", "utf8");
 const calendarCheckSource = await readFile("scripts/progressCalendar.check.mjs", "utf8");
+const workoutHistorySource = await readFile("workoutHistory.ts", "utf8");
+const workoutHistoryCheckSource = await readFile("scripts/workoutHistory.check.mjs", "utf8");
 
 const countMatches = (source, pattern) => source.match(pattern)?.length ?? 0;
 
@@ -180,6 +182,81 @@ assert.match(
   appSource,
   /cell\.isToday && styles\.calendarCellTextToday[\s\S]*cell\.isToday && styles\.calendarCalorieTextToday/,
   "Full calendar today cells should keep day and calorie text readable",
+);
+assert.match(
+  appSource,
+  /buildRememberedExerciseRecommendations\(\{[\s\S]*?weeks,[\s\S]*?extraDaysByWeek: extraWorkoutDays,[\s\S]*?baseDay: activeWorkoutBaseDay,[\s\S]*?beforeWeekIndex: activeWeekIndex/,
+  "Exercise recommendations should use all remembered same-family workout history",
+);
+assert.match(
+  appSource,
+  /findPreviousExerciseByExactName\(\{[\s\S]*?exercise,[\s\S]*?weeks,[\s\S]*?extraDaysByWeek: extraWorkoutDays,[\s\S]*?baseDay: activeWorkoutBaseDay,[\s\S]*?beforeWeekIndex: activeWeekIndex/,
+  "Set comparison should use exact exercise names from same-family workout history",
+);
+assert.doesNotMatch(
+  appSource,
+  /previousDayCandidates\[0\]\?\.exercises\[exerciseIndex\]/,
+  "Set comparison should not fall back to same-index exercises",
+);
+assert.doesNotMatch(
+  appSource,
+  /Based on what you completed last week\./,
+  "Recommendation copy should not imply the old one-week-only behavior",
+);
+assert.match(
+  workoutHistorySource,
+  /normalizeExerciseIdentity[\s\S]*replace\(\/\\s\+\/g,\s*" "\)/,
+  "Exercise identity should normalize spacing without fuzzy substring matching",
+);
+assert.match(
+  workoutHistorySource,
+  /extraDay\.baseDay === baseDay/,
+  "Extra Push/Pull/Legs days should be grouped with their base workout family",
+);
+assert.match(
+  workoutHistoryCheckSource,
+  /skipped in the immediately previous week/,
+  "Workout history checks should cover exercises skipped for one week",
+);
+assert.match(
+  workoutHistoryCheckSource,
+  /should not match a random exercise only because it contains the same word/,
+  "Workout history checks should cover exact-name comparison",
+);
+assert.match(
+  appSource,
+  /exerciseSearchQuery[\s\S]*?buildExerciseSearchSuggestions\(\{[\s\S]*?query: exerciseSearchQuery/,
+  "Exercise input should search saved history using the letters typed by the user",
+);
+assert.match(
+  workoutHistoryCheckSource,
+  /multi-word letter prefixes should match the intended exercise/,
+  "Workout checks should cover multi-word exercise autocomplete",
+);
+assert.match(
+  appSource,
+  /buildCustomWorkoutDayBlueprints\([\s\S]*?kind: "custom"[\s\S]*?Array\.from\([\s\S]*?\(\) => makeSet\(\)/,
+  "New weeks should recreate remembered custom days with fresh set IDs and blank values",
+);
+assert.match(
+  appSource,
+  /record\.kind === "custom" \|\| record\.kind === "preset"[\s\S]*?isKnownPreset[\s\S]*?"custom"/,
+  "Legacy extra days should receive a backward-compatible custom or preset classification",
+);
+assert.match(
+  appSource,
+  /Alert\.alert\([\s\S]*?"Delete Custom Day"[\s\S]*?style: "cancel"[\s\S]*?style: "destructive"/,
+  "Custom workout day deletion should require an explicit native confirmation",
+);
+assert.match(
+  appSource,
+  /deleteActiveCustomWorkoutDay[\s\S]*?clearCompletedSetIds\(completedSetIds\)[\s\S]*?setActiveWorkoutDayId\(activeExtraWorkoutDay\.baseDay\)/,
+  "Deleting a custom day should clean only its completed set IDs and return to a valid base day",
+);
+assert.match(
+  workoutHistoryCheckSource,
+  /only custom days and their valid exercise structure should carry into a new week/,
+  "Workout checks should cover safe custom-day carry-forward behavior",
 );
 
 console.log("safety checks passed");

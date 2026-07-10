@@ -42,6 +42,12 @@ import {
   type CalendarCalorieLog,
   type CalendarMonthCell,
 } from "./progressCalendar";
+import {
+  buildCustomWorkoutDayBlueprints,
+  buildExerciseSearchSuggestions,
+  buildRememberedExerciseRecommendations,
+  findPreviousExerciseByExactName,
+} from "./workoutHistory";
 
 type WorkoutDayName = "Push" | "Pull" | "Legs";
 type WeightUnit = "lbs" | "kg";
@@ -134,6 +140,7 @@ type ExtraWorkoutDayEntry = {
   id: string;
   label: string;
   baseDay: WorkoutDayName;
+  kind: "preset" | "custom";
   exercises: ExerciseEntry[];
   calories: DayCalories;
   createdAt: string;
@@ -245,6 +252,8 @@ const XP_PER_LEVEL = 500;
 const MAX_STORED_WEEKS = 520;
 const MAX_EXTRA_DAYS_PER_WEEK = 365;
 const MAX_EXERCISES_PER_DAY = 100;
+const MAX_EXERCISE_SEARCH_SUGGESTIONS = 8;
+const MAX_CUSTOM_DAY_NAME_LENGTH = 48;
 const MAX_SETS_PER_EXERCISE = 100;
 const MAX_CALORIE_LOGS_PER_DAY = 5000;
 const MAX_CALORIE_SESSIONS_PER_DAY = 1000;
@@ -986,11 +995,18 @@ const normalizeExtraWorkoutDay = (value: unknown): ExtraWorkoutDayEntry | null =
     rawBaseDay === "Pull" || rawBaseDay === "Legs" || rawBaseDay === "Push" ? rawBaseDay : "Push";
   const rawExercises = Array.isArray(record.exercises) ? record.exercises : [];
   const label = typeof record.label === "string" && record.label.trim() ? record.label.trim() : `Extra ${baseDay}`;
+  const isKnownPreset = EXTRA_DAY_PRESETS.some((preset) => preset.label !== "Custom" && preset.label === label);
+  const kind = record.kind === "custom" || record.kind === "preset"
+    ? record.kind
+    : isKnownPreset
+      ? "preset"
+      : "custom";
 
   return {
     id: typeof record.id === "string" ? record.id : makeId("extra_day"),
     label,
     baseDay,
+    kind,
     exercises: rawExercises.map(normalizeExercise),
     calories: normalizeCalories(record.calories),
     createdAt: normalizeStoredDate(record.createdAt),
@@ -1629,30 +1645,34 @@ export default function App() {
   );
   const currentLevelXP = useMemo(() => gamificationStats.totalXP % XP_PER_LEVEL, [gamificationStats.totalXP]);
   const levelProgress = useMemo(() => currentLevelXP / XP_PER_LEVEL, [currentLevelXP]);
+  const exerciseSearchQuery = newExerciseName.trim();
   const recommendedExercises = useMemo(() => {
-    const previousDay = previousWeek?.days[activeWorkoutBaseDay];
-    if (!previousDay) {
-      return [];
+    if (exerciseSearchQuery) {
+      return buildExerciseSearchSuggestions({
+        weeks,
+        extraDaysByWeek: extraWorkoutDays,
+        currentExercises: currentWorkoutDay.exercises,
+        query: exerciseSearchQuery,
+        maxSuggestions: MAX_EXERCISE_SEARCH_SUGGESTIONS,
+      });
     }
 
-    const currentExerciseNames = new Set(currentWorkoutDay.exercises.map((exercise) => normalizeName(exercise.name)));
-    const seenRecommendations = new Set<string>();
-
-    return previousDay.exercises.reduce((recommendations, exercise) => {
-      const exerciseName = exercise.name.trim();
-      const recommendationKey = normalizeName(exerciseName);
-      const wasCompletedLastWeek = exercise.sets.some(
-        (set) => Boolean(completedSets[set.id]) || (safeNumber(set.weight) > 0 && safeNumber(set.reps) > 0),
-      );
-
-      if (!exerciseName || !wasCompletedLastWeek || currentExerciseNames.has(recommendationKey) || seenRecommendations.has(recommendationKey)) {
-        return recommendations;
-      }
-
-      seenRecommendations.add(recommendationKey);
-      return [...recommendations, exerciseName];
-    }, [] as string[]);
-  }, [activeWorkoutBaseDay, completedSets, currentWorkoutDay.exercises, previousWeek]);
+    return buildRememberedExerciseRecommendations({
+      weeks,
+      extraDaysByWeek: extraWorkoutDays,
+      baseDay: activeWorkoutBaseDay,
+      beforeWeekIndex: activeWeekIndex,
+      currentExercises: currentWorkoutDay.exercises,
+      maxRecommendations: MAX_EXERCISE_SEARCH_SUGGESTIONS,
+    });
+  }, [
+    activeWeekIndex,
+    activeWorkoutBaseDay,
+    currentWorkoutDay.exercises,
+    exerciseSearchQuery,
+    extraWorkoutDays,
+    weeks,
+  ]);
 
   useEffect(() => {
     completedSetsRef.current = completedSets;
@@ -2229,43 +2249,16 @@ export default function App() {
   );
 
   const findPreviousExercise = useCallback(
-    (exercise: ExerciseEntry, exerciseIndex: number) => {
-      if (!previousWeek) {
-        return undefined;
-      }
-
-      const previousExtraWorkoutDays = extraWorkoutDays[previousWeek.id] ?? [];
-      const matchingExtraDay = activeExtraWorkoutDay
-        ? previousExtraWorkoutDays.find((day) => normalizeName(day.label) === normalizeName(activeExtraWorkoutDay.label))
-        : undefined;
-      const previousDayCandidates: WorkoutDayContent[] = [];
-
-      if (matchingExtraDay) {
-        previousDayCandidates.push(matchingExtraDay);
-      }
-
-      previousDayCandidates.push(previousWeek.days[activeWorkoutBaseDay]);
-
-      previousExtraWorkoutDays.forEach((day) => {
-        if (day.baseDay === activeWorkoutBaseDay && day.id !== matchingExtraDay?.id) {
-          previousDayCandidates.push(day);
-        }
+    (exercise: ExerciseEntry, _exerciseIndex: number) => {
+      return findPreviousExerciseByExactName({
+        exercise,
+        weeks,
+        extraDaysByWeek: extraWorkoutDays,
+        baseDay: activeWorkoutBaseDay,
+        beforeWeekIndex: activeWeekIndex,
       });
-
-      previousExtraWorkoutDays.forEach((day) => {
-        if (day.baseDay !== activeWorkoutBaseDay) {
-          previousDayCandidates.push(day);
-        }
-      });
-
-      const exerciseName = normalizeName(exercise.name);
-      const namedMatch = previousDayCandidates
-        .flatMap((day) => day.exercises)
-        .find((candidate) => exerciseName !== "" && normalizeName(candidate.name) === exerciseName);
-
-      return namedMatch ?? previousDayCandidates[0]?.exercises[exerciseIndex];
     },
-    [activeExtraWorkoutDay, activeWorkoutBaseDay, extraWorkoutDays, previousWeek],
+    [activeWeekIndex, activeWorkoutBaseDay, extraWorkoutDays, weeks],
   );
 
   const getPreviousSet = useCallback(
@@ -2536,11 +2529,37 @@ export default function App() {
     const previous = weeks[weeks.length - 1];
     const nextWeekNumber = (previous?.weekNumber ?? weeks.length) + 1;
     const nextWeek = createBlankWeek(nextWeekNumber, previous);
+    const rememberedCustomDays = buildCustomWorkoutDayBlueprints(
+      previous ? extraWorkoutDays[previous.id] ?? [] : [],
+    ).map((blueprint): ExtraWorkoutDayEntry => ({
+      id: makeId("extra_day"),
+      label: blueprint.label,
+      baseDay: blueprint.baseDay,
+      kind: "custom",
+      exercises: blueprint.exercises.map((exercise) =>
+        makeExercise(
+          exercise.name,
+          Array.from(
+            { length: Math.min(MAX_SETS_PER_EXERCISE, exercise.setCount) },
+            () => makeSet(),
+          ),
+        ),
+      ),
+      calories: makeCalories(nextWeek.days[blueprint.baseDay].calories.target),
+      createdAt: new Date().toISOString(),
+    }));
+
     setWeeks((previousWeeks) => [...previousWeeks, nextWeek]);
+    if (rememberedCustomDays.length > 0) {
+      setExtraWorkoutDays((previousExtraDays) => ({
+        ...previousExtraDays,
+        [nextWeek.id]: rememberedCustomDays,
+      }));
+    }
     setActiveWeekIndex(weeks.length);
     setActiveDay("Push");
     setActiveWorkoutDayId("Push");
-  }, [weeks]);
+  }, [extraWorkoutDays, weeks]);
 
   const deleteCurrentWeek = useCallback(() => {
     if (weeks.length <= 1) {
@@ -2956,14 +2975,25 @@ export default function App() {
   }, []);
 
   const addExtraWorkoutDay = useCallback((preset: ExtraWorkoutDayPreset) => {
+    if (currentExtraWorkoutDays.length >= MAX_EXTRA_DAYS_PER_WEEK) {
+      Alert.alert("Day limit reached", "Delete an extra workout day before adding another one.");
+      return;
+    }
+
     const presetConfig = EXTRA_DAY_PRESETS.find((option) => option.label === preset) ?? EXTRA_DAY_PRESETS[0];
-    const customLabel = customDayName.trim();
+    const customLabel = customDayName.trim().slice(0, MAX_CUSTOM_DAY_NAME_LENGTH);
     const baseDay = preset === "Custom" ? activeWorkoutBaseDay : presetConfig.baseDay;
     const label = preset === "Custom" ? customLabel || `Custom Day ${currentExtraWorkoutDays.length + 1}` : presetConfig.label;
+    if (currentExtraWorkoutDays.some((day) => normalizeName(day.label) === normalizeName(label))) {
+      Alert.alert("Day already exists", `A workout day named ${label} already exists in this week.`);
+      return;
+    }
+
     const nextDay: ExtraWorkoutDayEntry = {
       id: makeId("extra_day"),
       label,
       baseDay,
+      kind: preset === "Custom" ? "custom" : "preset",
       exercises: [],
       calories: makeCalories(currentWeek.days[baseDay].calories.target),
       createdAt: new Date().toISOString(),
@@ -2976,7 +3006,46 @@ export default function App() {
     setActiveWorkoutDayId(nextDay.id);
     setCustomDayName("");
     setIsAddDayModalVisible(false);
-  }, [activeWorkoutBaseDay, currentExtraWorkoutDays.length, currentWeek.days, currentWeek.id, customDayName]);
+  }, [activeWorkoutBaseDay, currentExtraWorkoutDays, currentWeek.days, currentWeek.id, customDayName]);
+
+  const deleteActiveCustomWorkoutDay = useCallback(() => {
+    if (!activeExtraWorkoutDay || activeExtraWorkoutDay.kind !== "custom") {
+      return;
+    }
+
+    const completedSetIds = activeExtraWorkoutDay.exercises.flatMap((exercise) =>
+      exercise.sets.map((set) => set.id),
+    );
+    setExtraWorkoutDays((previousExtraDays) => {
+      const remainingDays = (previousExtraDays[currentWeek.id] ?? []).filter(
+        (day) => day.id !== activeExtraWorkoutDay.id,
+      );
+      if (remainingDays.length === 0) {
+        const nextExtraDays = { ...previousExtraDays };
+        delete nextExtraDays[currentWeek.id];
+        return nextExtraDays;
+      }
+
+      return { ...previousExtraDays, [currentWeek.id]: remainingDays };
+    });
+    clearCompletedSetIds(completedSetIds);
+    setActiveWorkoutDayId(activeExtraWorkoutDay.baseDay);
+  }, [activeExtraWorkoutDay, clearCompletedSetIds, currentWeek.id]);
+
+  const confirmDeleteActiveCustomWorkoutDay = useCallback(() => {
+    if (!activeExtraWorkoutDay || activeExtraWorkoutDay.kind !== "custom") {
+      return;
+    }
+
+    Alert.alert(
+      "Delete Custom Day",
+      `Delete ${activeExtraWorkoutDay.label} from Week ${currentWeek.weekNumber}? Its exercises and sets in this week will be removed.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", onPress: deleteActiveCustomWorkoutDay, style: "destructive" },
+      ],
+    );
+  }, [activeExtraWorkoutDay, currentWeek.weekNumber, deleteActiveCustomWorkoutDay]);
 
   const setRestTimerDuration = useCallback((duration: number) => {
     const nextDuration = Math.max(MIN_REST_SECONDS, Math.round(duration));
@@ -3149,6 +3218,16 @@ export default function App() {
       <TouchableOpacity activeOpacity={0.8} onPress={() => setIsAddDayModalVisible(true)} style={styles.addDayButton}>
         <Text style={styles.addDayButtonText}>+ Add Day</Text>
       </TouchableOpacity>
+      {activeExtraWorkoutDay?.kind === "custom" ? (
+        <TouchableOpacity
+          accessibilityLabel={`Delete custom workout day ${activeExtraWorkoutDay.label}`}
+          activeOpacity={0.8}
+          onPress={confirmDeleteActiveCustomWorkoutDay}
+          style={styles.deleteCustomDayButton}
+        >
+          <Text style={styles.deleteCustomDayButtonText}>Delete Custom Day</Text>
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 
@@ -3272,6 +3351,7 @@ export default function App() {
             <Text style={styles.labelText}>Custom</Text>
             <View style={styles.calorieInputRow}>
               <TextInput
+                maxLength={MAX_CUSTOM_DAY_NAME_LENGTH}
                 onChangeText={setCustomDayName}
                 placeholder="Custom day name"
                 placeholderTextColor={theme.placeholder}
@@ -3319,8 +3399,12 @@ export default function App() {
 
     return (
       <View style={styles.recommendedExercisePanel}>
-        <Text style={styles.recommendedExerciseTitle}>Recommended Exercises</Text>
-        <Text style={styles.recommendedExerciseSubtitle}>Based on what you completed last week.</Text>
+        <Text style={styles.recommendedExerciseTitle}>
+          {exerciseSearchQuery ? "Matching Exercises" : "Recommended Exercises"}
+        </Text>
+        <Text style={styles.recommendedExerciseSubtitle}>
+          {exerciseSearchQuery ? "Matches from your saved workout history." : "Based on your saved day history."}
+        </Text>
         <View style={styles.recommendedExerciseList}>
           {recommendedExercises.map((exerciseName) => (
             <TouchableOpacity
@@ -3336,7 +3420,7 @@ export default function App() {
         </View>
       </View>
     );
-  }, [addRecommendedExercise, recommendedExercises, showExerciseRecommendations, styles]);
+  }, [addRecommendedExercise, exerciseSearchQuery, recommendedExercises, showExerciseRecommendations, styles]);
 
   const renderWorkoutHeader = useCallback(
     () => (
@@ -3367,7 +3451,10 @@ export default function App() {
           <TextInput
             blurOnSubmit={false}
             key={`${activeWorkoutDayId}-add-exercise`}
-            onChangeText={setNewExerciseName}
+            onChangeText={(value) => {
+              setNewExerciseName(value);
+              setShowExerciseRecommendations(true);
+            }}
             onFocus={() => setShowExerciseRecommendations(true)}
             placeholder="Add exercise"
             placeholderTextColor={theme.placeholder}
@@ -4805,6 +4892,23 @@ function createStyles(theme: ThemeTokens) {
   },
   addDayButtonText: {
     color: theme.text,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  deleteCustomDayButton: {
+    alignItems: "center",
+    backgroundColor: surface,
+    borderColor: coral,
+    borderRadius: 12,
+    borderWidth: 1,
+    justifyContent: "center",
+    marginBottom: 16,
+    marginTop: -6,
+    minHeight: 44,
+    paddingHorizontal: 14,
+  },
+  deleteCustomDayButtonText: {
+    color: coral,
     fontSize: 14,
     fontWeight: "900",
   },
