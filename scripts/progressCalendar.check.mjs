@@ -28,6 +28,7 @@ const {
   countDateKeysInWeek,
   dateKeyFromIso,
   getStartOfWeekDateKey,
+  isValidDateKey,
   MAX_COMPLETED_DATE_KEYS,
   MAX_PROGRESS_HISTORY_MONTHS,
   MAX_PROGRESS_HISTORY_WEEKS,
@@ -40,6 +41,9 @@ const appSource = await readFile("App.tsx", "utf8");
 const appAst = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const calendarFunctions = new Set([
   "activeCalorieLogsForCalendar", "appendSessionCalendarCalorieLogs", "appendCalendarCalorieLogs",
+  "normalizeCalorieSession", "normalizeCalorieLog", "inferCalorieSessionStartedAt", "normalizeStoredDate",
+  "isValidDateString", "asRecord", "limitStoredItems", "normalizeMacroValues", "normalizeStoredNonNegativeNumber",
+  "normalizeStoredNumber", "isFiniteNumber", "hasMacroValues",
 ]);
 const appFunctions = appAst.statements
   .filter((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some(
@@ -56,7 +60,7 @@ const findResetCallback = (node) => {
 findResetCallback(appAst);
 assert(resetCallback, "nutrition reset callback must be covered by the regression check");
 const runtimeSource = ts.transpileModule(
-  `${appFunctions.join("\n")}\nconst reset = ${resetCallback};\nthis.project = appendCalendarCalorieLogs; this.reset = reset;`,
+  `${appFunctions.join("\n")}\nconst reset = ${resetCallback};\nthis.project = appendCalendarCalorieLogs; this.reset = reset; this.normalizeSession = normalizeCalorieSession;`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 ).outputText;
 
@@ -69,10 +73,11 @@ try {
   let day = { calories: { startedAt: resetTime, startedAtSource: "stored", logs: [firstMeal], history: [] } };
   let sequence = 0;
   const context = vm.createContext({
-    dateKeyFromIso, resolveCalorieSessionStartedAt,
+    dateKeyFromIso, resolveCalorieSessionStartedAt, isValidDateKey,
     isStarterCalorieLog: () => false,
     Date: class extends Date { constructor(...args) { super(...(args.length ? args : [resetTime])); } },
     todayDateKey: "2026-09-21", activeDay: "Push", MAX_CALORIE_SESSIONS_PER_DAY: 1000,
+    MAX_CALORIE_LOGS_PER_DAY: 5000,
     updateCurrentDay: (update) => { day = update(day); },
     makeId: () => `session-${++sequence}`,
     setQuickCalorieDrafts: () => {}, setCalorieDrafts: () => {}, setNutritionResetNotice: () => {},
@@ -115,6 +120,20 @@ try {
   const september = buildMonthCalendarCells([], "2026-09", "2026-09-21", project());
   assert.equal(september.find((cell) => cell.key === "2026-09-20").calories, 2000);
   assert.equal(september.find((cell) => cell.key === "2026-09-21").calories, 500);
+  day.calories.history = [{
+    id: "late-entry", startedAt: resetTime, endedAt: "2026-09-21T12:30:00+03:00",
+    dateKey: "2026-09-20", logs: [meal("entered-after-midnight", "2026-09-21T00:35:00+03:00")],
+  }];
+  const lateEntry = JSON.stringify(day);
+  assert.deepEqual(project(), { "2026-09-20": 2000 }, "an explicit food date must override a late entry timestamp");
+  assert.equal(JSON.stringify(day), lateEntry, "an explicit food date must preserve the real log timestamps");
+  day = JSON.parse(JSON.stringify(day));
+  day.calories.history = day.calories.history.map(context.normalizeSession);
+  assert.equal(day.calories.history[0].dateKey, "2026-09-20", "storage normalization must preserve an explicit food date");
+  assert.deepEqual(project(), { "2026-09-20": 2000 }, "a food date must survive storage serialization");
+  day.calories.history[0].dateKey = "2026-02-31";
+  assert.equal(context.normalizeSession(day.calories.history[0]).dateKey, undefined, "storage normalization must discard invalid food dates");
+  assert.deepEqual(project(), { "2026-09-21": 2000 }, "an invalid explicit date must fall back to the session timestamp");
 } finally {
   if (originalTZ === undefined) delete process.env.TZ;
   else process.env.TZ = originalTZ;

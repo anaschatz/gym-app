@@ -101,6 +101,7 @@ type CalorieLogSession = {
   id: string;
   startedAt: string;
   endedAt: string;
+  dateKey?: string;
   logs: CalorieLog[];
 };
 
@@ -948,6 +949,7 @@ const normalizeCalorieSession = (value: unknown): CalorieLogSession | null => {
         ? record.startedAt
         : inferCalorieSessionStartedAt(logs),
     endedAt: normalizeStoredDate(record?.endedAt),
+    dateKey: typeof record?.dateKey === "string" && isValidDateKey(record.dateKey) ? record.dateKey : undefined,
     logs,
   };
 };
@@ -1294,7 +1296,10 @@ const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalo
   );
   calories.history.forEach((session) => {
     const sessionStart = resolveCalorieSessionStartedAt(session.startedAt, session.logs);
-    appendSessionCalendarCalorieLogs(logs, session.logs, sessionStart ? dateKeyFromIso(sessionStart) : null);
+    const sessionDateKey = session.dateKey && isValidDateKey(session.dateKey)
+      ? session.dateKey
+      : sessionStart ? dateKeyFromIso(sessionStart) : null;
+    appendSessionCalendarCalorieLogs(logs, session.logs, sessionDateKey);
   });
 };
 
