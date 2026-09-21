@@ -37,6 +37,7 @@ import {
   getPreviousDateKey,
   getStartOfWeekDateKey,
   isValidDateKey,
+  resolveCalorieSessionStartedAt,
   sanitizeCompletedDateKeys,
   type CalendarCell,
   type CalendarCalorieLog,
@@ -1282,13 +1283,18 @@ const appendSessionCalendarCalorieLogs = (
 };
 
 const appendCalendarCalorieLogs = (logs: CalendarCalorieLog[], calories: DayCalories, todayKey: string) => {
+  const activeLogs = activeCalorieLogsForCalendar(calories, todayKey);
+  const startedAt = calories.startedAtSource === "stored"
+    ? resolveCalorieSessionStartedAt(calories.startedAt, activeLogs)
+    : null;
   appendSessionCalendarCalorieLogs(
     logs,
-    activeCalorieLogsForCalendar(calories, todayKey),
-    calories.startedAtSource === "stored" ? dateKeyFromIso(calories.startedAt) : null,
+    activeLogs,
+    startedAt ? dateKeyFromIso(startedAt) : null,
   );
   calories.history.forEach((session) => {
-    appendSessionCalendarCalorieLogs(logs, session.logs, dateKeyFromIso(session.startedAt));
+    const sessionStart = resolveCalorieSessionStartedAt(session.startedAt, session.logs);
+    appendSessionCalendarCalorieLogs(logs, session.logs, sessionStart ? dateKeyFromIso(sessionStart) : null);
   });
 };
 
@@ -2840,7 +2846,10 @@ export default function App() {
 
     updateCurrentDay((day) => {
       const logsToArchive = activeCalorieLogsForCalendar(day.calories, todayDateKey);
-      const archiveStartedAt = day.calories.startedAtSource === "stored" ? day.calories.startedAt : resetAt;
+      const archiveStartedAt = resolveCalorieSessionStartedAt(
+        day.calories.startedAtSource === "stored" ? day.calories.startedAt : null,
+        logsToArchive,
+      ) ?? resetAt;
 
       return {
         ...day,

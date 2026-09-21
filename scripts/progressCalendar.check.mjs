@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import vm from "node:vm";
 
 const helperSourcePath = path.resolve("progressCalendar.ts");
 const helperSource = await readFile(helperSourcePath, "utf8");
@@ -25,12 +26,99 @@ const {
   buildProgressHistoryWeeks,
   buildWeekCalendarCells,
   countDateKeysInWeek,
+  dateKeyFromIso,
   getStartOfWeekDateKey,
   MAX_COMPLETED_DATE_KEYS,
   MAX_PROGRESS_HISTORY_MONTHS,
   MAX_PROGRESS_HISTORY_WEEKS,
   sanitizeCompletedDateKeys,
+  resolveCalorieSessionStartedAt,
 } = await import(pathToFileURL(tempModulePath).href);
+
+// Exercise the application's real projection and reset callbacks with synthetic data.
+const appSource = await readFile("App.tsx", "utf8");
+const appAst = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const calendarFunctions = new Set([
+  "activeCalorieLogsForCalendar", "appendSessionCalendarCalorieLogs", "appendCalendarCalorieLogs",
+]);
+const appFunctions = appAst.statements
+  .filter((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some(
+    (declaration) => calendarFunctions.has(declaration.name.getText(appAst)),
+  ))
+  .map((node) => node.getText(appAst));
+let resetCallback;
+const findResetCallback = (node) => {
+  if (ts.isVariableDeclaration(node) && node.name.getText(appAst) === "resetNutritionForNewDay") {
+    resetCallback = node.initializer.arguments[0].getText(appAst);
+  }
+  ts.forEachChild(node, findResetCallback);
+};
+findResetCallback(appAst);
+assert(resetCallback, "nutrition reset callback must be covered by the regression check");
+const runtimeSource = ts.transpileModule(
+  `${appFunctions.join("\n")}\nconst reset = ${resetCallback};\nthis.project = appendCalendarCalorieLogs; this.reset = reset;`,
+  { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+).outputText;
+
+const originalTZ = process.env.TZ;
+try {
+  process.env.TZ = "Europe/Athens";
+  const meal = (id, createdAt, amount = 2000) => ({ id, type: "add", amount, createdAt });
+  const firstMeal = meal("sep-20", "2026-09-20T20:00:00+03:00");
+  const resetTime = "2026-09-21T00:10:00+03:00";
+  let day = { calories: { startedAt: resetTime, startedAtSource: "stored", logs: [firstMeal], history: [] } };
+  let sequence = 0;
+  const context = vm.createContext({
+    dateKeyFromIso, resolveCalorieSessionStartedAt,
+    isStarterCalorieLog: () => false,
+    Date: class extends Date { constructor(...args) { super(...(args.length ? args : [resetTime])); } },
+    todayDateKey: "2026-09-21", activeDay: "Push", MAX_CALORIE_SESSIONS_PER_DAY: 1000,
+    updateCurrentDay: (update) => { day = update(day); },
+    makeId: () => `session-${++sequence}`,
+    setQuickCalorieDrafts: () => {}, setCalorieDrafts: () => {}, setNutritionResetNotice: () => {},
+    formatDateTime: (date) => date,
+  });
+  vm.runInContext(runtimeSource, context);
+  const project = () => {
+    const logs = [];
+    context.project(logs, day.calories, "2026-09-21");
+    return buildConsumedCaloriesByDate(logs);
+  };
+  assert.deepEqual(project(), { "2026-09-20": 2000 }, "a later session timestamp must not move September 20 meals to 21");
+  const beforeProjection = JSON.stringify(day);
+  project();
+  assert.equal(JSON.stringify(day), beforeProjection, "calendar recovery must not rewrite saved data");
+  context.reset();
+  assert.equal(day.calories.history[0].startedAt, firstMeal.createdAt, "reset must archive the recovered start, not the reset date");
+  assert.deepEqual(project(), { "2026-09-20": 2000 }, "the archived session must keep its recovered date");
+  day.calories.history[0].startedAt = resetTime;
+  assert.deepEqual(project(), { "2026-09-20": 2000 }, "existing archived data must also recover without a migration");
+  context.reset();
+  assert.equal(day.calories.history.length, 1, "an empty repeated reset must not duplicate history");
+  day.calories.logs = [meal("sep-21", "2026-09-21T12:00:00+03:00", 500)];
+  context.reset();
+  assert.deepEqual(project(), { "2026-09-21": 500, "2026-09-20": 2000 }, "real September 21 intake must stay separate");
+
+  const start = "2026-09-20T10:00:00+03:00";
+  assert.equal(resolveCalorieSessionStartedAt(start, [meal("late", resetTime)]), start, "after-midnight intake must retain a valid earlier session start");
+  assert.equal(resolveCalorieSessionStartedAt(null, [meal("late", resetTime), firstMeal]), firstMeal.createdAt, "missing starts must recover the earliest log across midnight");
+  assert.equal(resolveCalorieSessionStartedAt("bad-date", [meal("bad", "bad-date")]), null, "invalid dates must not default to today");
+  assert.equal(resolveCalorieSessionStartedAt(null, [meal("bad", start, NaN)]), null, "invalid calorie values must not establish a session start");
+  assert.equal(
+    dateKeyFromIso(resolveCalorieSessionStartedAt("2026-09-20T22:00:00Z", [meal("utc", "2026-09-20T20:30:00Z")])),
+    "2026-09-20", "UTC timestamps near local midnight must resolve to the local meal date",
+  );
+  assert.equal(
+    resolveCalorieSessionStartedAt("2026-10-25T03:10:00+02:00", [meal("dst", "2026-10-25T03:40:00+03:00")]),
+    "2026-10-25T03:40:00+03:00", "session order must use instants during daylight-saving clock changes",
+  );
+  const september = buildMonthCalendarCells([], "2026-09", "2026-09-21", project());
+  assert.equal(september.find((cell) => cell.key === "2026-09-20").calories, 2000);
+  assert.equal(september.find((cell) => cell.key === "2026-09-21").calories, 500);
+} finally {
+  if (originalTZ === undefined) delete process.env.TZ;
+  else process.env.TZ = originalTZ;
+}
 
 const weekCells = buildWeekCalendarCells([], "2026-06-17", "2026-06-17");
 assert.deepEqual(

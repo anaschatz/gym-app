@@ -133,6 +133,27 @@ export const dateKeyFromIso = (isoDate: string) => {
   return formatDateKey(date);
 };
 
+export const resolveCalorieSessionStartedAt = (
+  startedAt: string | null,
+  logs: readonly CalendarCalorieLog[],
+): string | null => {
+  let earliest = startedAt && dateKeyFromIso(startedAt) ? startedAt : null;
+  for (const log of logs) {
+    if (
+      (log.type !== "add" && log.type !== "extract") ||
+      typeof log.amount !== "number" || !Number.isFinite(log.amount) || log.amount <= 0 ||
+      typeof log.createdAt !== "string" || !dateKeyFromIso(log.createdAt)
+    ) {
+      continue;
+    }
+    // A reset/recovery timestamp cannot start a session after its own logs.
+    if (!earliest || new Date(log.createdAt).getTime() < new Date(earliest).getTime()) {
+      earliest = log.createdAt;
+    }
+  }
+  return earliest;
+};
+
 export const dateKeyToTime = (dateKey: string) => {
   const parts = parseDateKeyParts(dateKey);
   return parts ? Date.UTC(parts.year, parts.month - 1, parts.day) : null;
